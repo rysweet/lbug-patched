@@ -40,6 +40,18 @@ fn link_libraries(link_bundled_deps: bool) {
             println!("cargo:rustc-link-lib=dylib=stdc++");
         }
 
+        // PATCHED FORK: the from-source 0.17.x build whole-archives both
+        // `liblbug.a` and the bundled third-party archives (antlr4_cypher,
+        // antlr4_runtime, …), but `liblbug.a` already contains those objects, so
+        // each symbol is defined twice at link time. The definitions are
+        // byte-identical (one compile of one source tree), so tell the linker to
+        // keep the first and drop the rest instead of failing with "duplicate
+        // symbol". (The prebuilt path links only the self-contained liblbug.a and
+        // never reaches this branch, so this is scoped to the from-source case.)
+        if link_bundled_deps && !cfg!(windows) {
+            println!("cargo:rustc-link-arg=-Wl,--allow-multiple-definition");
+        }
+
         if !link_bundled_deps {
             return;
         }
