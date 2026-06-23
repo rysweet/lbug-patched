@@ -70,14 +70,14 @@ impl<'db> QueryResult<'db> {
     ///
     /// This corresponds to the length of each result vector yielded by the iterator.
     pub fn get_num_columns(&self) -> usize {
-        self.result.as_ref().unwrap().getNumColumns()
+        ffi::query_result_get_num_columns(self.result.as_ref().unwrap())
     }
     /// Returns the number of tuples in the query result.
     ///
     /// This corresponds to the total number of result
     /// vectors that the query result iterator will yield.
     pub fn get_num_tuples(&self) -> u64 {
-        self.result.as_ref().unwrap().getNumTuples()
+        ffi::query_result_get_num_tuples(self.result.as_ref().unwrap())
     }
 
     /// Returns the name of each column in the query result
@@ -113,6 +113,46 @@ impl<'db> QueryResult<'db> {
             schema,
         })
     }
+
+    #[cfg(feature = "arrow")]
+    /// Returns native CSR arrays from an Arrow query result.
+    ///
+    /// This is available for Arrow-native results with CSR metadata, typically results produced by
+    /// [`Connection::query_as_arrow`](crate::Connection::query_as_arrow) for relationship-shaped
+    /// row-id projections.
+    ///
+    /// *Requires the `arrow` feature*
+    pub fn csr(&self) -> Result<CsrResult, crate::error::Error> {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::DataType;
+
+        fn import_i64_array(
+            array: crate::ffi::arrow::ArrowArray,
+        ) -> Result<Int64Array, crate::error::Error> {
+            let data = unsafe { arrow::ffi::from_ffi_and_data_type(array.0, DataType::Int64) }?;
+            Ok(Int64Array::from(data))
+        }
+
+        let result = self.result.as_ref().unwrap();
+        let indptr = import_i64_array(crate::ffi::arrow::ffi_arrow::query_result_get_csr_indptr(
+            result,
+        )?)?;
+        let indices = import_i64_array(
+            crate::ffi::arrow::ffi_arrow::query_result_get_csr_indices(result)?,
+        )?;
+        let edge_ids = if crate::ffi::arrow::ffi_arrow::query_result_has_csr_edge_ids(result)? {
+            Some(import_i64_array(
+                crate::ffi::arrow::ffi_arrow::query_result_get_csr_edge_ids(result)?,
+            )?)
+        } else {
+            None
+        };
+        Ok(CsrResult {
+            indptr,
+            indices,
+            edge_ids,
+        })
+    }
 }
 
 // the underlying C++ type is both data and an iterator (sort-of)
@@ -120,10 +160,10 @@ impl Iterator for QueryResult<'_> {
     type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.result.as_ref().unwrap().hasNext() {
-            let flat_tuple = self.result.pin_mut().getNext();
+        if ffi::query_result_has_next(self.result.as_ref().unwrap()) {
+            let flat_tuple = ffi::query_result_get_next(self.result.pin_mut());
             let mut result = vec![];
-            for i in 0..flat_tuple.as_ref().unwrap().len() {
+            for i in 0..ffi::flat_tuple_len(flat_tuple.as_ref().unwrap()) {
                 let value = ffi::flat_tuple_get_value(flat_tuple.as_ref().unwrap(), i);
                 // TODO: Return result instead of unwrapping?
                 // Unfortunately, as an iterator, this would require producing
@@ -137,6 +177,16 @@ impl Iterator for QueryResult<'_> {
             None
         }
     }
+}
+
+#[cfg(feature = "arrow")]
+/// Native CSR arrays exported from an Arrow query result.
+///
+/// *Requires the `arrow` feature*
+pub struct CsrResult {
+    pub indptr: arrow::array::Int64Array,
+    pub indices: arrow::array::Int64Array,
+    pub edge_ids: Option<arrow::array::Int64Array>,
 }
 
 #[cfg(feature = "arrow")]
@@ -156,7 +206,7 @@ impl Iterator for ArrowIterator<'_, '_> {
     type Item = arrow::record_batch::RecordBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.result.as_ref().unwrap().hasNext() {
+        if crate::ffi::arrow::ffi_arrow::query_result_has_next_arrow_chunk(self.result.pin_mut()) {
             use crate::ffi::arrow::ffi_arrow;
             // Generally this panic should be unreachable, since the only exceptions produced by
             // arrow_converter are for unsupported types, but those would produce an error when we
@@ -284,6 +334,41 @@ mod tests {
         let rb = result.next().unwrap();
         assert_eq!(rb.num_rows(), 1);
         assert_eq!(result.next(), None);
+        temp_dir.close()?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "arrow")]
+    fn test_query_as_arrow_csr() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test");
+        let db = Database::new(path, SYSTEM_CONFIG_FOR_TESTS)?;
+        let conn = Connection::new(&db)?;
+        conn.query("CREATE NODE TABLE Person(id INT64, PRIMARY KEY(id));")?;
+        conn.query("CREATE (:Person {id: 0});")?;
+        conn.query("CREATE (:Person {id: 1});")?;
+        conn.query("CREATE REL TABLE Knows(FROM Person TO Person, weight INT64);")?;
+        conn.query("MATCH (a:Person), (b:Person) WHERE a.id = 0 AND b.id = 1 CREATE (a)-[:Knows {weight: 7}]->(b);")?;
+        conn.query("MATCH (a:Person), (b:Person) WHERE a.id = 1 AND b.id = 0 CREATE (a)-[:Knows {weight: 9}]->(b);")?;
+
+        let result = conn.query_as_arrow(
+            "MATCH (a:Person)-[r:Knows]->(b:Person) RETURN a.rowid, r.rowid, b.rowid",
+            8,
+        )?;
+        let csr = result.csr()?;
+
+        assert_eq!(csr.indptr.len(), 3);
+        assert_eq!(csr.indptr.value(0), 0);
+        assert_eq!(csr.indptr.value(1), 1);
+        assert_eq!(csr.indptr.value(2), 2);
+        assert_eq!(csr.indices.len(), 2);
+        assert_eq!(csr.indices.value(0), 1);
+        assert_eq!(csr.indices.value(1), 0);
+        let edge_ids = csr.edge_ids.expect("CSR result should include edge ids");
+        assert_eq!(edge_ids.len(), 2);
+        assert_eq!(edge_ids.value(0), 0);
+        assert_eq!(edge_ids.value(1), 1);
         temp_dir.close()?;
         Ok(())
     }

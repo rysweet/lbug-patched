@@ -295,8 +295,8 @@ NodeGroupScanResult CSRNodeGroup::scanCommittedInMemSequential(const Transaction
         }
     }
     if (chunkedGroup == nullptr) {
-        // Stale/invalid in-memory CSR row maps to an out-of-range chunk group:
-        // nothing to scan (LadybugDB #611).
+        // Invalid/out-of-range chunk index for this in-memory CSR range; treat
+        // as empty rather than dereferencing a null group (LadybugDB #100).
         return NODE_GROUP_SCAN_EMPTY_RESULT;
     }
     chunkedGroup->scan(transaction, tableState, nodeGroupScanState, startRowInChunk, numRows);
@@ -329,12 +329,11 @@ NodeGroupScanResult CSRNodeGroup::scanCommittedInMemRandom(const Transaction* tr
                 nullptr;
         }
         if (chunkedGroup == nullptr) {
-            // Stale/invalid in-memory CSR row (chunkIdx out of range): skip it
-            // rather than dereferencing an out-of-bounds group (LadybugDB #611).
+            // Stale/invalid in-memory CSR row index (chunkIdx out of range):
+            // skip it rather than dereferencing an out-of-bounds group (LadybugDB #100).
             nextRow++;
             continue;
         }
-        DASSERT(chunkedGroup);
         numSelected += chunkedGroup->lookup(transaction, tableState, nodeGroupScanState, rowInChunk,
             numSelected);
         nextRow++;

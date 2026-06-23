@@ -13,10 +13,11 @@
 edition = "2021"
 rust-version = "1.81"
 name = "lbug"
-version = "0.15.4"
+version = "0.17.1"
 build = "build.rs"
 include = [
     "build.rs",
+    "/scripts",
     "/src",
     "/include",
     "/lbug-src/src",
@@ -40,7 +41,7 @@ keywords = [
 ]
 categories = ["database"]
 license = "MIT"
-repository = "https://github.com/lbugdb/lbug"
+repository = "https://github.com/LadybugDB/ladybug-rust"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -66,6 +67,9 @@ version = "=1.0.138"
 [dependencies.rust_decimal]
 version = "1.37"
 default-features = false
+
+[dependencies.serde_json]
+version = "1"
 
 [dependencies.time]
 version = "0.3"

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "common/exception/runtime.h"
 #include "common/types/internal_id_util.h"
@@ -8,23 +10,30 @@
 #include "transaction/transaction.h"
 
 namespace lbug {
+namespace main {
+class ClientContext;
+} // namespace main
 namespace storage {
 
-struct ParquetRelTableScanState final : RelTableScanState {
-    std::unique_ptr<processor::ParquetReaderScanState> parquetScanState;
-    // For CSR format: store matching rows for current bound node
-    size_t nextRowToProcess = 0;
+enum class IceDiskRelTableLayout : uint8_t { CSR, FLAT };
 
-    // Row group range for morsel-driven parallelism
-    uint64_t startRowGroup = 0;
-    uint64_t endRowGroup = 0;
-    uint64_t currentRowGroup = 0;
+struct IceDiskRelTableScanState final : RelTableScanState {
+    std::unique_ptr<processor::ParquetReaderScanState> parquetScanState;
+
+    // cached data for the current batch in current row group
+    std::unique_ptr<common::DataChunk> cachedBatchData;
+    common::offset_t currentBatchStartOffset =
+        0; // Global row index of the start of the current batch of the current row group
+    common::offset_t currentLocalRowIdx =
+        0; // Row index within the current batch of the current row group
+    std::unordered_map<common::offset_t, common::sel_t>
+        boundNodeOffsets; // Map from bound node offset to selection vector index
 
     // Per-scan-state readers for thread safety
     std::unique_ptr<processor::ParquetReader> indicesReader;
     std::unique_ptr<processor::ParquetReader> indptrReader;
 
-    ParquetRelTableScanState(MemoryManager& mm, common::ValueVector* nodeIDVector,
+    IceDiskRelTableScanState(MemoryManager& mm, common::ValueVector* nodeIDVector,
         std::vector<common::ValueVector*> outputVectors,
         std::shared_ptr<common::DataChunkState> outChunkState)
         : RelTableScanState{mm, nodeIDVector, std::move(outputVectors), std::move(outChunkState)} {
@@ -35,13 +44,22 @@ struct ParquetRelTableScanState final : RelTableScanState {
         std::vector<common::column_id_t> columnIDs_,
         std::vector<ColumnPredicateSet> columnPredicateSets_,
         common::RelDataDirection direction_) override;
+
+    void reset(std::unordered_map<common::offset_t, common::sel_t> boundNodeOffsets_) {
+        cachedBatchData = nullptr;
+        currentBatchStartOffset = 0;
+        currentLocalRowIdx = 0;
+        boundNodeOffsets = std::move(boundNodeOffsets_);
+    }
+
+    void reloadCachedBatchData(transaction::Transaction* transaction);
 };
 
-class ParquetRelTable final : public ColumnarRelTableBase {
+class IceDiskRelTable final : public ColumnarRelTableBase {
 public:
-    ParquetRelTable(catalog::RelGroupCatalogEntry* relGroupEntry, common::table_id_t fromTableID,
+    IceDiskRelTable(catalog::RelGroupCatalogEntry* relGroupEntry, common::table_id_t fromTableID,
         common::table_id_t toTableID, const StorageManager* storageManager,
-        MemoryManager* memoryManager);
+        MemoryManager* memoryManager, main::ClientContext* context = nullptr);
 
     void initScanState(transaction::Transaction* transaction, TableScanState& scanState,
         bool resetCachedBoundNodeSelVec = true) const override;
@@ -50,10 +68,19 @@ public:
 
 protected:
     // Implement ColumnarRelTableBase interface
-    std::string getColumnarFormatName() const override { return "Parquet"; }
+    std::string getColumnarFormatName() const override { return "icebug-disk"; }
     common::row_idx_t getTotalRowCount(const transaction::Transaction* transaction) const override;
+    common::row_idx_t getActiveBoundNodeCount(const transaction::Transaction* transaction,
+        common::RelDataDirection direction) const override;
+    std::vector<std::pair<common::offset_t, common::row_idx_t>> getAllDegreeEntries(
+        const transaction::Transaction* transaction,
+        common::RelDataDirection direction) const override;
+    std::vector<std::pair<common::offset_t, common::row_idx_t>> getTopKDegreeEntries(
+        const transaction::Transaction* transaction, common::RelDataDirection direction,
+        common::idx_t k) const override;
 
 private:
+    IceDiskRelTableLayout layout;
     std::string indicesFilePath;
     std::string indptrFilePath;
     mutable std::unique_ptr<processor::ParquetReader> indicesReader;
@@ -65,13 +92,9 @@ private:
     void initializeParquetReaders(transaction::Transaction* transaction) const;
     void initializeIndptrReader(transaction::Transaction* transaction) const;
     void loadIndptrData(transaction::Transaction* transaction) const;
-    bool scanInternalByRowGroups(transaction::Transaction* transaction,
-        ParquetRelTableScanState& parquetRelScanState);
-    bool scanRowGroupForBoundNodes(transaction::Transaction* transaction,
-        ParquetRelTableScanState& parquetRelScanState,
-        const std::vector<uint64_t>& rowGroupsToProcess,
-        const std::unordered_set<common::offset_t>& boundNodeOffsets);
     common::offset_t findSourceNodeForRow(common::offset_t globalRowIdx) const;
+    bool scanCSR(transaction::Transaction* transaction, IceDiskRelTableScanState& scanState);
+    bool scanFlat(transaction::Transaction* transaction, IceDiskRelTableScanState& scanState);
 };
 
 } // namespace storage

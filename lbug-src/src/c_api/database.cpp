@@ -13,7 +13,7 @@ lbug_state lbug_database_init(const char* database_path, lbug_system_config conf
         auto systemConfig = SystemConfig(config.buffer_pool_size, config.max_num_threads,
             config.enable_compression, config.read_only, config.max_db_size, config.auto_checkpoint,
             config.checkpoint_threshold, true, config.throw_on_wal_replay_failure,
-            config.enable_checksums, config.enable_multi_writes);
+            config.enable_checksums, config.enable_multi_writes, config.enable_default_hash_index);
 
 #if defined(__APPLE__)
         systemConfig.threadQos = config.thread_qos;
@@ -33,6 +33,7 @@ void lbug_database_destroy(lbug_database* database) {
     }
     if (database->_database != nullptr) {
         delete static_cast<Database*>(database->_database);
+        database->_database = nullptr;
     }
 }
 
@@ -49,6 +50,7 @@ lbug_system_config lbug_default_system_config() {
     cSystemConfig.throw_on_wal_replay_failure = config.throwOnWalReplayFailure;
     cSystemConfig.enable_checksums = config.enableChecksums;
     cSystemConfig.enable_multi_writes = config.enableMultiWrites;
+    cSystemConfig.enable_default_hash_index = config.enableDefaultHashIndex;
 #if defined(__APPLE__)
     cSystemConfig.thread_qos = config.threadQos;
 #endif

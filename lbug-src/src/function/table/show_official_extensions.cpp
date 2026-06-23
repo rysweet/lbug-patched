@@ -12,6 +12,7 @@ namespace lbug {
 namespace function {
 
 static constexpr std::pair<std::string_view, std::string_view> extensions[] = {
+    {"ADBC", "Adds support for reading from ADBC data sources"},
     {"ALGO", "Adds support for graph algorithms"},
     {"AZURE", "Adds support for reading from azure blob storage"},
     {"DELTA", "Adds support for reading from delta tables"},
@@ -23,7 +24,8 @@ static constexpr std::pair<std::string_view, std::string_view> extensions[] = {
     {"NEO4J", "Adds support for migrating nodes and rels from neo4j to lbug"},
     {"POSTGRES", "Adds support for reading from POSTGRES tables"},
     {"SQLITE", "Adds support for reading from SQLITE tables"},
-    {"UNITY_CATALOG", "Adds support for scanning delta tables registered in unity catalog"}};
+    {"UNITY_CATALOG", "Adds support for scanning delta tables registered in unity catalog"},
+    {"VECTOR", "Adds support for vector indexes"}};
 static constexpr auto officialExtensions = std::to_array(extensions);
 
 static offset_t internalTableFunc(const TableFuncMorsel& morsel, const TableFuncInput& /*input*/,

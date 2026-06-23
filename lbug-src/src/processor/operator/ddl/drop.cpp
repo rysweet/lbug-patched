@@ -84,6 +84,10 @@ void Drop::dropTable(const main::ClientContext* context) {
     case CatalogEntryType::NODE_TABLE_ENTRY: {
         for (auto& indexEntry : catalog->getIndexEntries(transaction)) {
             if (indexEntry->getTableID() == entry->getTableID()) {
+                if (StringUtils::caseInsensitiveEquals(indexEntry->getIndexType(), "HASH") ||
+                    StringUtils::caseInsensitiveEquals(indexEntry->getIndexType(), "ART")) {
+                    continue;
+                }
                 throw BinderException(
                     std::format("Cannot delete node table {} because it is referenced by index {}.",
                         entry->getName(), indexEntry->getIndexName()));
@@ -119,6 +123,10 @@ void Drop::dropMacro(const main::ClientContext* context) {
 void Drop::dropGraph(const main::ClientContext* context) {
     auto dbManager = main::DatabaseManager::Get(*context);
     auto memoryManager = storage::MemoryManager::Get(*context);
+
+    if (StringUtils::caseInsensitiveEquals(dropInfo.name, "main")) {
+        throw BinderException{"Cannot drop the main graph."};
+    }
 
     if (!dbManager->hasGraph(dropInfo.name)) {
         auto message = std::format("Graph {} does not exist.", dropInfo.name);

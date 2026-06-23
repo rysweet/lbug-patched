@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include "common/serializer/buffer_writer.h"
 #include "common/types/types.h"
@@ -145,6 +146,21 @@ public:
         const transaction::Transaction* transaction, MemoryManager* mm, visible_func isVisible) = 0;
     virtual void delete_(transaction::Transaction* transaction,
         const common::ValueVector& nodeIDVector, DeleteState& deleteState) = 0;
+    virtual bool lookupPrimaryKey(const transaction::Transaction* /*transaction*/,
+        common::ValueVector* /*keyVector*/, uint64_t /*vectorPos*/, common::offset_t& /*result*/,
+        visible_func /*isVisible*/) {
+        return false;
+    }
+    virtual bool scanPrimaryKeyRange(common::ValueVector* /*lowerBoundVector*/,
+        uint64_t /*lowerBoundPos*/, bool /*lowerInclusive*/,
+        common::ValueVector* /*upperBoundVector*/, uint64_t /*upperBoundPos*/,
+        bool /*upperInclusive*/, common::idx_t /*maxResults*/,
+        std::vector<common::offset_t>& /*results*/, visible_func /*isVisible*/) {
+        return false;
+    }
+    virtual void discardPrimaryKey(common::ValueVector* /*keyVector*/) {
+        // DO NOTHING.
+    }
     virtual bool needCommitInsert() const { return false; }
     virtual void commitInsert(transaction::Transaction*, const common::ValueVector&,
         const std::vector<common::ValueVector*>&, InsertState&) {

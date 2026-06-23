@@ -31,6 +31,8 @@ std::string PhysicalOperatorUtils::operatorTypeToString(PhysicalOperatorType ope
         return "COUNT_REL_TABLE";
     case PhysicalOperatorType::CREATE_MACRO:
         return "CREATE_MACRO";
+    case PhysicalOperatorType::CREATE_INDEX:
+        return "CREATE_INDEX";
     case PhysicalOperatorType::CREATE_SEQUENCE:
         return "CREATE_SEQUENCE";
     case PhysicalOperatorType::CREATE_TABLE:
@@ -95,6 +97,8 @@ std::string PhysicalOperatorUtils::operatorTypeToString(PhysicalOperatorType ope
         return "PROFILE";
     case PhysicalOperatorType::RECURSIVE_EXTEND:
         return "RECURSIVE_EXTEND";
+    case PhysicalOperatorType::REL_DEGREE_TABLE:
+        return "REL_DEGREE_TABLE";
     case PhysicalOperatorType::RESULT_COLLECTOR:
         return "RESULT_COLLECTOR";
     case PhysicalOperatorType::SCAN_NODE_TABLE:

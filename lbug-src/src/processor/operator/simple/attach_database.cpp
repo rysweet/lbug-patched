@@ -37,6 +37,7 @@ void AttachDatabase::executeInternal(ExecutionContext* context) {
             attachInfo.dbAlias, common::ATTACHED_LBUG_DB_TYPE, client);
         client->setDefaultDatabase(db.get());
         databaseManager->registerAttachedDatabase(std::move(db));
+        client->addDBDirToFileSearchPath(attachInfo.dbPath);
         appendMessage(attachMessage(), memoryManager);
         return;
     }
@@ -45,18 +46,18 @@ void AttachDatabase::executeInternal(ExecutionContext* context) {
             auto db = storageExtension->attach(attachInfo.dbAlias, attachInfo.dbPath, client,
                 attachInfo.options);
             databaseManager->registerAttachedDatabase(std::move(db));
+            client->addDBDirToFileSearchPath(attachInfo.dbPath);
             appendMessage(attachMessage(), memoryManager);
             return;
         }
     }
     auto errMsg =
         std::format("No loaded extension can handle database type: {}.", attachInfo.dbType);
-    if (attachInfo.dbType == "duckdb") {
-        errMsg += "\nDid you forget to load duckdb extension?\nYou can load it by: load "
-                  "extension duckdb;";
-    } else if (attachInfo.dbType == "postgres") {
-        errMsg += "\nDid you forget to load postgres extension?\nYou can load it by: load "
-                  "extension postgres;";
+    auto dbType = common::StringUtils::getLower(attachInfo.dbType);
+    if (dbType == "adbc" || dbType == "duckdb" || dbType == "postgres" || dbType == "sqlite") {
+        errMsg += std::format("\nDid you forget to load {} extension?\nYou can load it by: load "
+                              "extension {};",
+            dbType, dbType);
     }
     throw common::RuntimeException{errMsg};
 }

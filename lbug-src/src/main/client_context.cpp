@@ -27,6 +27,7 @@
 #include "storage/buffer_manager/buffer_manager.h"
 #include "storage/buffer_manager/spiller.h"
 #include "storage/storage_manager.h"
+#include "storage/storage_utils.h"
 #include "transaction/transaction_context.h"
 #include <format>
 #include <processor/warning_context.h>
@@ -60,9 +61,10 @@ ClientContext::ClientContext(Database* database) : localDatabase{database} {
     graphEntrySet = std::make_unique<graph::GraphEntrySet>();
     clientConfig.homeDirectory = getUserHomeDir();
     clientConfig.fileSearchPath = "";
+    addDBDirToFileSearchPath(database->databasePath);
     clientConfig.enableSemiMask = ClientConfigDefault::ENABLE_SEMI_MASK;
     clientConfig.enableZoneMap = ClientConfigDefault::ENABLE_ZONE_MAP;
-    clientConfig.numThreads = database->dbConfig.maxNumThreads;
+    clientConfig.numThreads = database->dbConfig->maxNumThreads;
     clientConfig.timeoutInMS = ClientConfigDefault::TIMEOUT_IN_MS;
     clientConfig.varLengthMaxDepth = ClientConfigDefault::VAR_LENGTH_MAX_DEPTH;
     clientConfig.enableProgressBar = ClientConfigDefault::ENABLE_PROGRESS_BAR;
@@ -86,11 +88,11 @@ ClientContext::~ClientContext() {
 }
 
 const DBConfig* ClientContext::getDBConfig() const {
-    return &getDatabase()->dbConfig;
+    return getDatabase()->dbConfig.get();
 }
 
 DBConfig* ClientContext::getDBConfigUnsafe() const {
-    return &getDatabase()->dbConfig;
+    return getDatabase()->dbConfig.get();
 }
 
 uint64_t ClientContext::getTimeoutRemainingInMS() const {
@@ -117,7 +119,7 @@ uint64_t ClientContext::getQueryTimeOut() const {
 void ClientContext::setMaxNumThreadForExec(uint64_t numThreads) {
     lock_t lck{mtx};
     if (numThreads == 0) {
-        numThreads = localDatabase->dbConfig.maxNumThreads;
+        numThreads = localDatabase->dbConfig->maxNumThreads;
     }
     clientConfig.numThreads = numThreads;
 }
@@ -207,6 +209,38 @@ bool ClientContext::isInMemory() const {
         return false;
     }
     return localDatabase->storageManager->isInMemory();
+}
+
+void ClientContext::addDBDirToFileSearchPath(const std::string& dbPath) {
+    // Skip remote paths (e.g. s3://, https://)
+    if (dbPath.find("://") != std::string::npos) {
+        return;
+    }
+    if (dbPath.find_first_of("/\\") == std::string::npos) {
+        return;
+    }
+    const auto expandedPath = storage::StorageUtils::expandPath(this, dbPath);
+    const auto slashPos = expandedPath.find_last_of("/\\");
+    if (slashPos == std::string::npos) {
+        return;
+    }
+    std::string dirPath = expandedPath.substr(0, slashPos);
+    if (dirPath.empty()) {
+        dirPath = expandedPath[slashPos] == '\\' ? "\\" : "/";
+    } else {
+        dirPath = std::filesystem::absolute(dirPath).lexically_normal().string();
+    }
+    // Prepend to fileSearchPath if not already present
+    auto& fileSearchPath = clientConfig.fileSearchPath;
+    if (!fileSearchPath.empty()) {
+        const auto searchPaths = StringUtils::split(fileSearchPath, ",");
+        if (std::find(searchPaths.begin(), searchPaths.end(), dirPath) != searchPaths.end()) {
+            return;
+        }
+        fileSearchPath = std::format("{},{}", dirPath, fileSearchPath);
+    } else {
+        fileSearchPath = dirPath;
+    }
 }
 
 std::string ClientContext::getEnvVariable(const std::string& name) {

@@ -83,6 +83,8 @@ pub enum LogicalType {
     },
     /// Correponds to [`Value::UUID`](crate::value::Value::UUID)
     UUID,
+    /// Corresponds to [`Value::Json`](crate::value::Value::Json)
+    Json,
     /// Correponds to [`Value::Decimal`](crate::value::Value::Decimal)
     Decimal {
         precision: u32,
@@ -99,7 +101,7 @@ impl From<&ffi::Value> for LogicalType {
 impl From<&ffi::LogicalType> for LogicalType {
     fn from(logical_type: &ffi::LogicalType) -> Self {
         use ffi::LogicalTypeID;
-        match logical_type.getLogicalTypeID() {
+        match ffi::logical_type_get_logical_type_id(logical_type) {
             LogicalTypeID::ANY => LogicalType::Any,
             LogicalTypeID::BOOL => LogicalType::Bool,
             LogicalTypeID::SERIAL => LogicalType::Serial,
@@ -188,6 +190,7 @@ impl From<&ffi::LogicalType> for LogicalType {
                 }
             }
             LogicalTypeID::UUID => LogicalType::UUID,
+            LogicalTypeID::JSON => LogicalType::Json,
             LogicalTypeID::DECIMAL => {
                 let precision = ffi::logical_type_get_decimal_precision(logical_type);
                 let scale = ffi::logical_type_get_decimal_scale(logical_type);
@@ -230,7 +233,8 @@ impl From<&LogicalType> for cxx::UniquePtr<ffi::LogicalType> {
             | LogicalType::Node
             | LogicalType::Rel
             | LogicalType::RecursiveRel
-            | LogicalType::UUID => ffi::create_logical_type(typ.id()),
+            | LogicalType::UUID
+            | LogicalType::Json => ffi::create_logical_type(typ.id()),
             LogicalType::List { child_type } => {
                 ffi::create_logical_type_list(child_type.as_ref().into())
             }
@@ -243,7 +247,7 @@ impl From<&LogicalType> for cxx::UniquePtr<ffi::LogicalType> {
                 let mut names = vec![];
                 for (name, typ) in fields {
                     names.push(name.clone());
-                    builder.pin_mut().insert(typ.into());
+                    ffi::type_list_insert(builder.pin_mut(), typ.into());
                 }
                 ffi::create_logical_type_struct(&names, builder)
             }
@@ -252,7 +256,7 @@ impl From<&LogicalType> for cxx::UniquePtr<ffi::LogicalType> {
                 let mut names = vec![];
                 for (name, typ) in types {
                     names.push(name.clone());
-                    builder.pin_mut().insert(typ.into());
+                    ffi::type_list_insert(builder.pin_mut(), typ.into());
                 }
                 ffi::create_logical_type_union(&names, builder)
             }
@@ -304,6 +308,7 @@ impl LogicalType {
             LogicalType::Map { .. } => LogicalTypeID::MAP,
             LogicalType::Union { .. } => LogicalTypeID::UNION,
             LogicalType::UUID => LogicalTypeID::UUID,
+            LogicalType::Json => LogicalTypeID::JSON,
             LogicalType::Decimal { .. } => LogicalTypeID::DECIMAL,
         }
     }

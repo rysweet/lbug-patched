@@ -1,5 +1,10 @@
 #include "optimizer/filter_push_down_optimizer.h"
 
+#include <algorithm>
+#include <array>
+#include <functional>
+#include <unordered_set>
+
 #include "binder/expression/literal_expression.h"
 #include "binder/expression/property_expression.h"
 #include "binder/expression/scalar_function_expression.h"
@@ -10,6 +15,9 @@
 #include "planner/operator/logical_hash_join.h"
 #include "planner/operator/logical_table_function_call.h"
 #include "planner/operator/scan/logical_scan_node_table.h"
+#include "storage/index/art_index.h"
+#include "storage/storage_manager.h"
+#include "storage/table/node_table.h"
 
 using namespace lbug::binder;
 using namespace lbug::common;
@@ -193,8 +201,10 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
         primaryKeyEqualityComparison = predicateSet.popNodePKEqualityComparison(*nodeID);
     }
     if (primaryKeyEqualityComparison != nullptr) { // Try rewrite index scan
+        auto* table =
+            StorageManager::Get(*context)->getTable(tableIDs[0])->ptrCast<storage::NodeTable>();
         auto rhs = primaryKeyEqualityComparison->getChild(1);
-        if (isConstantExpression(rhs)) {
+        if (table->tryGetPrimaryKeyIndex() != nullptr && isConstantExpression(rhs)) {
             auto extraInfo = std::make_unique<PrimaryKeyScanInfo>(rhs);
             scan.setScanType(LogicalScanNodeTableType::PRIMARY_KEY_SCAN);
             scan.setExtraInfo(std::move(extraInfo));
@@ -203,6 +213,22 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
             // Cannot rewrite and add predicate back.
             predicateSet.addPredicate(primaryKeyEqualityComparison);
         }
+    } else if (tableIDs.size() == 1) {
+        auto* table =
+            StorageManager::Get(*context)->getTable(tableIDs[0])->ptrCast<storage::NodeTable>();
+        auto* pkIndex = table->tryGetPrimaryKeyIndex();
+        if (pkIndex != nullptr && pkIndex->getIndexInfo().indexType ==
+                                      storage::ArtPrimaryKeyIndex::getIndexType().typeName) {
+            auto primaryKeyRangeComparison = predicateSet.popNodePKRangeComparison(*nodeID);
+            if (primaryKeyRangeComparison.hasBound()) {
+                auto extraInfo = std::make_unique<PrimaryKeyScanInfo>(
+                    primaryKeyRangeComparison.lowerBound, primaryKeyRangeComparison.lowerInclusive,
+                    primaryKeyRangeComparison.upperBound, primaryKeyRangeComparison.upperInclusive);
+                scan.setScanType(LogicalScanNodeTableType::PRIMARY_KEY_SCAN);
+                scan.setExtraInfo(std::move(extraInfo));
+                scan.computeFlatSchema();
+            }
+        }
     }
     return finishPushDown(op);
 }
@@ -210,9 +236,32 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
 std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitTableFunctionCallReplace(
     const std::shared_ptr<LogicalOperator>& op) {
     auto& tableFunctionCall = op->cast<LogicalTableFunctionCall>();
-    auto columnPredicates = getColumnPredicateSets(tableFunctionCall.getBindData()->columns,
-        predicateSet.getAllPredicates());
+    if (!tableFunctionCall.getTableFunc().supportsPushDownFunc()) {
+        return finishPushDown(op);
+    }
+    std::vector<ColumnPredicateSet> columnPredicates;
+    std::unordered_set<const Expression*> pushedPredicates;
+    auto predicates = predicateSet.getAllPredicates();
+    for (auto& column : tableFunctionCall.getBindData()->columns) {
+        auto columnPredicateSet = ColumnPredicateSet();
+        for (auto& predicate : predicates) {
+            auto columnPredicate = ColumnPredicateUtil::tryConvert(*column, *predicate);
+            if (columnPredicate == nullptr) {
+                continue;
+            }
+            columnPredicateSet.addPredicate(std::move(columnPredicate));
+            pushedPredicates.insert(predicate.get());
+        }
+        columnPredicates.push_back(std::move(columnPredicateSet));
+    }
     tableFunctionCall.setColumnPredicates(std::move(columnPredicates));
+    auto remainingPredicates = PredicateSet();
+    for (auto& predicate : predicates) {
+        if (!pushedPredicates.contains(predicate.get())) {
+            remainingPredicates.addPredicate(predicate);
+        }
+    }
+    predicateSet = std::move(remainingPredicates);
     return finishPushDown(op);
 }
 
@@ -319,6 +368,76 @@ std::shared_ptr<Expression> PredicateSet::popNodePKEqualityComparison(const Expr
         return result;
     }
     return nullptr;
+}
+
+PrimaryKeyRangePredicate PredicateSet::popNodePKRangeComparison(const Expression& nodeID) {
+    PrimaryKeyRangePredicate result;
+    auto lowerPredicateIdx = INVALID_IDX;
+    auto upperPredicateIdx = INVALID_IDX;
+    for (auto i = 0u; i < nonEqualityPredicates.size(); ++i) {
+        auto predicate = nonEqualityPredicates[i];
+        if (!ExpressionTypeUtil::isComparison(predicate->expressionType) ||
+            predicate->expressionType == ExpressionType::NOT_EQUALS) {
+            continue;
+        }
+        auto comparisonType = predicate->expressionType;
+        std::shared_ptr<Expression> bound;
+        if (isNodePrimaryKey(*predicate->getChild(0), nodeID)) {
+            bound = predicate->getChild(1);
+        } else if (isNodePrimaryKey(*predicate->getChild(1), nodeID)) {
+            bound = predicate->getChild(0);
+            comparisonType = ExpressionTypeUtil::reverseComparisonDirection(comparisonType);
+        } else {
+            continue;
+        }
+        if (!isConstantExpression(bound)) {
+            continue;
+        }
+        switch (comparisonType) {
+        case ExpressionType::GREATER_THAN:
+            if (lowerPredicateIdx != INVALID_IDX) {
+                return {};
+            }
+            result.lowerBound = bound;
+            result.lowerInclusive = false;
+            lowerPredicateIdx = i;
+            break;
+        case ExpressionType::GREATER_THAN_EQUALS:
+            if (lowerPredicateIdx != INVALID_IDX) {
+                return {};
+            }
+            result.lowerBound = bound;
+            result.lowerInclusive = true;
+            lowerPredicateIdx = i;
+            break;
+        case ExpressionType::LESS_THAN:
+            if (upperPredicateIdx != INVALID_IDX) {
+                return {};
+            }
+            result.upperBound = bound;
+            result.upperInclusive = false;
+            upperPredicateIdx = i;
+            break;
+        case ExpressionType::LESS_THAN_EQUALS:
+            if (upperPredicateIdx != INVALID_IDX) {
+                return {};
+            }
+            result.upperBound = bound;
+            result.upperInclusive = true;
+            upperPredicateIdx = i;
+            break;
+        default:
+            break;
+        }
+    }
+    std::array<idx_t, 2> predicateIndices{lowerPredicateIdx, upperPredicateIdx};
+    std::sort(predicateIndices.begin(), predicateIndices.end(), std::greater<>());
+    for (auto predicateIdx : predicateIndices) {
+        if (predicateIdx != INVALID_IDX) {
+            nonEqualityPredicates.erase(nonEqualityPredicates.begin() + predicateIdx);
+        }
+    }
+    return result;
 }
 
 expression_vector PredicateSet::getAllPredicates() {

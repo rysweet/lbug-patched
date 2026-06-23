@@ -98,6 +98,8 @@ public:
         const planner::LogicalOperator* logicalOperator);
     std::unique_ptr<PhysicalOperator> mapCreateTable(
         const planner::LogicalOperator* logicalOperator);
+    std::unique_ptr<PhysicalOperator> mapCreateIndex(
+        const planner::LogicalOperator* logicalOperator);
     std::unique_ptr<PhysicalOperator> mapCreateType(
         const planner::LogicalOperator* logicalOperator);
     std::unique_ptr<PhysicalOperator> mapCrossProduct(
@@ -145,6 +147,8 @@ public:
     std::unique_ptr<PhysicalOperator> mapProjection(
         const planner::LogicalOperator* logicalOperator);
     std::unique_ptr<PhysicalOperator> mapRecursiveExtend(
+        const planner::LogicalOperator* logicalOperator);
+    std::unique_ptr<PhysicalOperator> mapRelDegreeTable(
         const planner::LogicalOperator* logicalOperator);
     std::unique_ptr<PhysicalOperator> mapScanNodeTable(
         const planner::LogicalOperator* logicalOperator);

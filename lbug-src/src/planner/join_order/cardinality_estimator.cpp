@@ -73,8 +73,12 @@ cardinality_t CardinalityEstimator::getNodeIDDom(const std::string& nodeIDName) 
 uint64_t CardinalityEstimator::estimateScanNode(const LogicalOperator& op) const {
     const auto& scan = op.constCast<const LogicalScanNodeTable&>();
     switch (scan.getScanType()) {
-    case LogicalScanNodeTableType::PRIMARY_KEY_SCAN:
-        return 1;
+    case LogicalScanNodeTableType::PRIMARY_KEY_SCAN: {
+        auto& primaryKeyScanInfo = scan.getExtraInfo()->constCast<PrimaryKeyScanInfo>();
+        return primaryKeyScanInfo.isRange ?
+                   atLeastOne(getNodeIDDom(scan.getNodeID()->getUniqueName())) :
+                   1;
+    }
     default:
         return atLeastOne(getNodeIDDom(scan.getNodeID()->getUniqueName()));
     }
@@ -168,6 +172,9 @@ static std::optional<cardinality_t> getTableStatsIfPossible(main::ClientContext*
             auto transaction = Transaction::Get(*context);
             auto entry =
                 catalog::Catalog::Get(*context)->getTableCatalogEntry(transaction, tableID);
+            if (!entry->containsProperty(propertyExpr.getPropertyName())) {
+                return {};
+            }
             auto columnID = entry->getColumnID(propertyExpr.getPropertyName());
             if (columnID != INVALID_COLUMN_ID && columnID != ROW_IDX_COLUMN_ID) {
                 auto& stats = nodeTableStats.at(tableID);

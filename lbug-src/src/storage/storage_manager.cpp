@@ -4,6 +4,8 @@
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "common/arrow/arrow.h"
+#include "common/constants.h"
+#include "common/enums/storage_format.h"
 #include "common/file_system/virtual_file_system.h"
 #include "common/random_engine.h"
 #include "common/serializer/in_mem_file_writer.h"
@@ -15,13 +17,14 @@
 #include "storage/buffer_manager/buffer_manager.h"
 #include "storage/buffer_manager/memory_manager.h"
 #include "storage/checkpointer.h"
+#include "storage/index/art_index.h"
 #include "storage/table/arrow_node_table.h"
 #include "storage/table/arrow_rel_table.h"
 #include "storage/table/arrow_table_support.h"
 #include "storage/table/foreign_rel_table.h"
+#include "storage/table/ice_disk_node_table.h"
+#include "storage/table/ice_disk_rel_table.h"
 #include "storage/table/node_table.h"
-#include "storage/table/parquet_node_table.h"
-#include "storage/table/parquet_rel_table.h"
 #include "storage/table/rel_table.h"
 #include "storage/wal/wal_replayer.h"
 #include "transaction/transaction.h"
@@ -35,14 +38,17 @@ namespace lbug {
 namespace storage {
 
 StorageManager::StorageManager(const std::string& databasePath, bool readOnly, bool enableChecksums,
-    MemoryManager& memoryManager, bool enableCompression, VirtualFileSystem* vfs)
+    MemoryManager& memoryManager, bool enableCompression, bool enableDefaultHashIndex,
+    VirtualFileSystem* vfs)
     : databasePath{databasePath}, readOnly{readOnly}, dataFH{nullptr}, memoryManager{memoryManager},
-      enableCompression{enableCompression} {
+      enableCompression{enableCompression}, enableDefaultHashIndex{enableDefaultHashIndex},
+      vfs_{vfs} {
     wal = std::make_unique<WAL>(databasePath, readOnly, enableChecksums, vfs);
     shadowFile =
         std::make_unique<ShadowFile>(*memoryManager.getBufferManager(), vfs, this->databasePath);
     inMemory = main::DBConfig::isDBPathInMemory(databasePath);
     registerIndexType(PrimaryKeyIndex::getIndexType());
+    registerIndexType(ArtPrimaryKeyIndex::getIndexType());
 }
 
 StorageManager::~StorageManager() = default;
@@ -94,9 +100,20 @@ void StorageManager::recover(main::ClientContext& clientContext, bool throwOnWal
     walReplayer->replay(throwOnWalReplayFailure, enableChecksums);
 }
 
-void StorageManager::createNodeTable(NodeTableCatalogEntry* entry) {
+void StorageManager::createNodeTable(NodeTableCatalogEntry* entry, main::ClientContext* context) {
     tableNameCache[entry->getTableID()] = entry->getName();
-    if (!entry->getStorage().empty()) {
+
+    if (entry->getStorageFormat() != StorageFormat::NONE) {
+        if (entry->getStorageFormat() == StorageFormat::ICEBUG_DISK) {
+            // Create icebug-disk-backed node table
+            tables[entry->getTableID()] =
+                std::make_unique<IceDiskNodeTable>(this, entry, &memoryManager, context);
+        } else {
+            throw common::RuntimeException(
+                "Unsupported storage format option for node table: " +
+                std::to_string(static_cast<int>(entry->getStorageFormat())));
+        }
+    } else if (!entry->getStorage().empty()) {
         // Check if storage is Arrow backed
         if (entry->getStorage().substr(0, 8) == "arrow://") {
             // Extract Arrow ID from storage string
@@ -121,9 +138,8 @@ void StorageManager::createNodeTable(NodeTableCatalogEntry* entry) {
             tables[entry->getTableID()] = std::make_unique<ArrowNodeTable>(this, entry,
                 &memoryManager, std::move(schemaCopy), std::move(arraysCopy), arrowId);
         } else {
-            // Create parquet-backed node table
-            tables[entry->getTableID()] =
-                std::make_unique<ParquetNodeTable>(this, entry, &memoryManager);
+            throw common::RuntimeException(
+                "Unsupported storage option for node table: " + entry->getStorage());
         }
     } else {
         // Create regular node table
@@ -134,18 +150,28 @@ void StorageManager::createNodeTable(NodeTableCatalogEntry* entry) {
 // TODO(Guodong): This API is added since storageManager doesn't provide an API to add a single
 // rel table. We may have to refactor the existing StorageManager::createTable(TableCatalogEntry*
 // entry).
-void StorageManager::addRelTable(RelGroupCatalogEntry* entry, const RelTableCatalogInfo& info) {
+void StorageManager::addRelTable(RelGroupCatalogEntry* entry, const RelTableCatalogInfo& info,
+    main::ClientContext* context) {
     if (entry->getScanFunction().has_value()) {
         // Create foreign-backed rel table
         tables[info.oid] = std::make_unique<ForeignRelTable>(entry, info.nodePair.srcTableID,
             info.nodePair.dstTableID, this, &memoryManager, *entry->getScanFunction(),
             std::move(entry->getScanBindData().value()));
+    } else if (entry->getStorageFormat() != StorageFormat::NONE) {
+        if (entry->getStorageFormat() == StorageFormat::ICEBUG_DISK) {
+            // Create icebug-disk-backed rel table
+            tables[info.oid] = std::make_unique<IceDiskRelTable>(entry, info.nodePair.srcTableID,
+                info.nodePair.dstTableID, this, &memoryManager, context);
+        } else {
+            throw common::RuntimeException(
+                "Unsupported storage format option for rel table: " +
+                std::to_string(static_cast<int>(entry->getStorageFormat())));
+        }
     } else if (!entry->getStorage().empty()) {
         if (entry->getStorage().substr(0, 8) == "arrow://") {
             std::string arrowId = entry->getStorage().substr(8);
-            ArrowSchemaWrapper* schema = nullptr;
-            std::vector<ArrowArrayWrapper>* arrays = nullptr;
-            if (!ArrowTableSupport::getArrowData(arrowId, schema, arrays)) {
+            ArrowRelTableData* relData = nullptr;
+            if (!ArrowTableSupport::getArrowRelData(arrowId, relData)) {
                 throw common::RuntimeException("Failed to retrieve Arrow data for ID: " + arrowId);
             }
             if (!tables.contains(info.nodePair.srcTableID) ||
@@ -159,19 +185,26 @@ void StorageManager::addRelTable(RelGroupCatalogEntry* entry, const RelTableCata
                 throw common::RuntimeException(
                     "Arrow rel table currently supports only regular node tables");
             }
-            ArrowSchemaWrapper schemaCopy = createShallowCopy(*schema);
+            ArrowSchemaWrapper schemaCopy = createShallowCopy(relData->schema);
             std::vector<ArrowArrayWrapper> arraysCopy;
-            arraysCopy.reserve(arrays->size());
-            for (const auto& arr : *arrays) {
+            arraysCopy.reserve(relData->arrays.size());
+            for (const auto& arr : relData->arrays) {
                 arraysCopy.push_back(createShallowCopy(arr));
+            }
+            ArrowSchemaWrapper indptrSchemaCopy = createShallowCopy(relData->indptrSchema);
+            std::vector<ArrowArrayWrapper> indptrArraysCopy;
+            indptrArraysCopy.reserve(relData->indptrArrays.size());
+            for (const auto& arr : relData->indptrArrays) {
+                indptrArraysCopy.push_back(createShallowCopy(arr));
             }
             tables[info.oid] = std::make_unique<ArrowRelTable>(entry, info.nodePair.srcTableID,
                 info.nodePair.dstTableID, this, &memoryManager, fromNodeTable, toNodeTable,
-                std::move(schemaCopy), std::move(arraysCopy), arrowId);
+                relData->layout, std::move(schemaCopy), std::move(arraysCopy),
+                std::move(indptrSchemaCopy), std::move(indptrArraysCopy), arrowId,
+                relData->dstColumnName);
         } else {
-            // Create parquet-backed rel table
-            tables[info.oid] = std::make_unique<ParquetRelTable>(entry, info.nodePair.srcTableID,
-                info.nodePair.dstTableID, this, &memoryManager);
+            throw common::RuntimeException(
+                "Unsupported storage option for rel table: " + entry->getStorage());
         }
     } else {
         // Create regular rel table
@@ -180,20 +213,21 @@ void StorageManager::addRelTable(RelGroupCatalogEntry* entry, const RelTableCata
     }
 }
 
-void StorageManager::createRelTableGroup(RelGroupCatalogEntry* entry) {
+void StorageManager::createRelTableGroup(RelGroupCatalogEntry* entry,
+    main::ClientContext* context) {
     for (auto& info : entry->getRelEntryInfos()) {
-        addRelTable(entry, info);
+        addRelTable(entry, info, context);
     }
 }
 
-void StorageManager::createTable(TableCatalogEntry* entry) {
+void StorageManager::createTable(TableCatalogEntry* entry, main::ClientContext* context) {
     std::unique_lock lck{mtx};
     switch (entry->getType()) {
     case CatalogEntryType::NODE_TABLE_ENTRY: {
-        createNodeTable(entry->ptrCast<NodeTableCatalogEntry>());
+        createNodeTable(entry->ptrCast<NodeTableCatalogEntry>(), context);
     } break;
     case CatalogEntryType::REL_GROUP_ENTRY: {
-        createRelTableGroup(entry->ptrCast<RelGroupCatalogEntry>());
+        createRelTableGroup(entry->ptrCast<RelGroupCatalogEntry>(), context);
     } break;
     default: {
         UNREACHABLE_CODE;
@@ -248,11 +282,11 @@ void StorageManager::reclaimDroppedTables(const Catalog& catalog) {
     }
 }
 
-bool StorageManager::checkpoint(main::ClientContext* context, PageAllocator& pageAllocator) {
+bool StorageManager::checkpoint(main::ClientContext* context, const Catalog& catalog,
+    PageAllocator& pageAllocator) {
     bool hasChanges = false;
-    const auto catalog = Catalog::Get(*context);
-    const auto nodeTableEntries = catalog->getNodeTableEntries(&DUMMY_CHECKPOINT_TRANSACTION);
-    const auto relGroupEntries = catalog->getRelGroupEntries(&DUMMY_CHECKPOINT_TRANSACTION);
+    const auto nodeTableEntries = catalog.getNodeTableEntries(&DUMMY_CHECKPOINT_TRANSACTION);
+    const auto relGroupEntries = catalog.getRelGroupEntries(&DUMMY_CHECKPOINT_TRANSACTION);
 
     std::shared_lock lck{mtx};
     for (const auto entry : nodeTableEntries) {
@@ -275,16 +309,16 @@ bool StorageManager::checkpoint(main::ClientContext* context, PageAllocator& pag
         entry->vacuumColumnIDs(1);
     }
     lck.unlock();
-    reclaimDroppedTables(*catalog);
+    reclaimDroppedTables(catalog);
     return hasChanges;
 }
 
-bool StorageManager::checkpoint(main::ClientContext* context, const Transaction& snapshotTxn,
-    PageAllocator& pageAllocator, const std::unordered_map<table_id_t, uint64_t>& epochWatermarks) {
+bool StorageManager::checkpoint(main::ClientContext* context, const Catalog& catalog,
+    const Transaction& snapshotTxn, PageAllocator& pageAllocator,
+    const std::unordered_map<table_id_t, uint64_t>& epochWatermarks) {
     bool hasChanges = false;
-    const auto catalog = Catalog::Get(*context);
-    const auto nodeTableEntries = catalog->getNodeTableEntries(&snapshotTxn);
-    const auto relGroupEntries = catalog->getRelGroupEntries(&snapshotTxn);
+    const auto nodeTableEntries = catalog.getNodeTableEntries(&snapshotTxn);
+    const auto relGroupEntries = catalog.getRelGroupEntries(&snapshotTxn);
 
     std::shared_lock lck{mtx};
     for (const auto entry : nodeTableEntries) {
@@ -314,7 +348,7 @@ bool StorageManager::checkpoint(main::ClientContext* context, const Transaction&
         entry->vacuumColumnIDs(1);
     }
     lck.unlock();
-    reclaimDroppedTables(*catalog);
+    reclaimDroppedTables(catalog);
     return hasChanges;
 }
 
@@ -435,9 +469,10 @@ void StorageManager::deserialize(main::ClientContext* context, const Catalog* ca
         auto tableEntry = catalog->getTableCatalogEntry(&DUMMY_TRANSACTION, tableID)
                               ->ptrCast<NodeTableCatalogEntry>();
         tableNameCache[tableID] = tableEntry->getName();
-        if (!tableEntry->getStorage().empty()) {
-            // Create parquet-backed node table
-            tables[tableID] = std::make_unique<ParquetNodeTable>(this, tableEntry, &memoryManager);
+        if (tableEntry->getStorageFormat() == StorageFormat::ICEBUG_DISK) {
+            // Create icebug-disk-backed node table
+            tables[tableID] =
+                std::make_unique<IceDiskNodeTable>(this, tableEntry, &memoryManager, context);
         } else {
             // Create regular node table
             tables[tableID] = std::make_unique<NodeTable>(this, tableEntry, &memoryManager);
@@ -463,10 +498,11 @@ void StorageManager::deserialize(main::ClientContext* context, const Catalog* ca
         for (auto k = 0u; k < numInnerRelTables; k++) {
             RelTableCatalogInfo info = RelTableCatalogInfo::deserialize(deSer);
             DASSERT(!tables.contains(info.oid));
-            if (!relGroupEntry->getStorage().empty()) {
-                // Create parquet-backed rel table
-                tables[info.oid] = std::make_unique<ParquetRelTable>(relGroupEntry,
-                    info.nodePair.srcTableID, info.nodePair.dstTableID, this, &memoryManager);
+            if (relGroupEntry->getStorageFormat() == StorageFormat::ICEBUG_DISK) {
+                // Create icebug-disk-backed rel table
+                tables[info.oid] =
+                    std::make_unique<IceDiskRelTable>(relGroupEntry, info.nodePair.srcTableID,
+                        info.nodePair.dstTableID, this, &memoryManager, context);
             } else {
                 // Create regular rel table
                 tables[info.oid] = std::make_unique<RelTable>(relGroupEntry,

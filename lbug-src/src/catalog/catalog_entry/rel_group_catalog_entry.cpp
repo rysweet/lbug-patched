@@ -4,7 +4,11 @@
 
 #include "binder/ddl/bound_create_table_info.h"
 #include "catalog/catalog.h"
+#include "common/constants.h"
+#include "common/enums/storage_format.h"
 #include "common/serializer/deserializer.h"
+#include "common/string_utils.h"
+#include "storage/storage_version_info.h"
 #include "transaction/transaction.h"
 #include <format>
 
@@ -13,6 +17,14 @@ using namespace lbug::main;
 
 namespace lbug {
 namespace catalog {
+
+static void upgradeLegacyStorageFormat(const std::string& storage,
+    common::StorageFormat& storageFormat) {
+    const auto lowerStorage = common::StringUtils::getLower(storage);
+    if (lowerStorage.ends_with("parquet")) {
+        storageFormat = common::StorageFormat::ICEBUG_DISK;
+    }
+}
 
 void RelGroupCatalogEntry::addFromToConnection(table_id_t srcTableID, table_id_t dstTableID,
     oid_t oid) {
@@ -105,6 +117,8 @@ void RelGroupCatalogEntry::serialize(Serializer& serializer) const {
     }
     serializer.writeDebuggingInfo("relTableInfos");
     serializer.serializeVector(relTableInfos);
+    serializer.writeDebuggingInfo("storageFormat");
+    serializer.serializeValue(storageFormat);
 }
 
 std::unique_ptr<RelGroupCatalogEntry> RelGroupCatalogEntry::deserialize(
@@ -114,6 +128,7 @@ std::unique_ptr<RelGroupCatalogEntry> RelGroupCatalogEntry::deserialize(
     auto dstMultiplicity = RelMultiplicity::MANY;
     auto storageDirection = ExtendDirection::BOTH;
     std::string storage;
+    auto storageFormat = StorageFormat::NONE;
     std::vector<RelTableCatalogInfo> relTableInfos;
     deserializer.validateDebuggingInfo(debuggingInfo, "srcMultiplicity");
     deserializer.deserializeValue(srcMultiplicity);
@@ -132,11 +147,19 @@ std::unique_ptr<RelGroupCatalogEntry> RelGroupCatalogEntry::deserialize(
     }
     deserializer.validateDebuggingInfo(debuggingInfo, "relTableInfos");
     deserializer.deserializeVector(relTableInfos);
+    if (deserializer.getStorageVersion() >=
+        ::lbug::storage::StorageVersionInfo::STORAGE_VERSION_41) {
+        deserializer.validateDebuggingInfo(debuggingInfo, "storageFormat");
+        deserializer.deserializeValue(storageFormat);
+    } else {
+        upgradeLegacyStorageFormat(storage, storageFormat);
+    }
     auto relGroupEntry = std::make_unique<RelGroupCatalogEntry>();
     relGroupEntry->srcMultiplicity = srcMultiplicity;
     relGroupEntry->dstMultiplicity = dstMultiplicity;
     relGroupEntry->storageDirection = storageDirection;
     relGroupEntry->storage = storage;
+    relGroupEntry->storageFormat = storageFormat;
     relGroupEntry->scanFunction = scanFunction;
     relGroupEntry->relTableInfos = relTableInfos;
     return relGroupEntry;
@@ -198,6 +221,7 @@ std::unique_ptr<TableCatalogEntry> RelGroupCatalogEntry::copy() const {
     other->dstMultiplicity = dstMultiplicity;
     other->storageDirection = storageDirection;
     other->storage = storage;
+    other->storageFormat = storageFormat;
     other->scanFunction = scanFunction;
     other->scanBindData = std::nullopt; // TODO: implement copy for bindData if needed
     other->foreignDatabaseName = foreignDatabaseName;
@@ -214,7 +238,7 @@ RelGroupCatalogEntry::getBoundExtraCreateInfo(transaction::Transaction*) const {
     }
     return std::make_unique<binder::BoundExtraCreateRelTableGroupInfo>(
         copyVector(propertyCollection.getDefinitions()), srcMultiplicity, dstMultiplicity,
-        storageDirection, std::move(nodePairs));
+        storageDirection, std::move(nodePairs), storage, storageFormat);
 }
 
 } // namespace catalog

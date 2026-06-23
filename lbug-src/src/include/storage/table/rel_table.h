@@ -1,5 +1,8 @@
 #pragma once
 
+#include <unordered_map>
+#include <vector>
+
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "storage/table/rel_table_data.h"
 #include "storage/table/table.h"
@@ -26,6 +29,17 @@ struct RelTableScanState : TableScanState {
     common::SelectionVector cachedBoundNodeSelVector;
 
     std::unique_ptr<LocalRelTableScanState> localTableScanState;
+
+    // Optional state used by Arrow-backed relationship tables. Keep it on the common scan state so
+    // a single multi-rel scan state can scan native, icebug-disk-backed, and Arrow-backed tables.
+    size_t arrowCurrentBatchIdx = 0;
+    size_t arrowCurrentBatchOffset = 0;
+    size_t arrowCSRBoundIdx = 0;
+    common::offset_t arrowCSRCurrentRelOffset = common::INVALID_OFFSET;
+    std::unordered_map<common::offset_t, common::sel_t> arrowBoundNodeOffsetToSelPos;
+    std::unique_ptr<common::ValueVector> arrowSrcKeyVector;
+    std::unique_ptr<common::ValueVector> arrowDstKeyVector;
+    bool arrowScanCompleted = true;
 
     RelTableScanState(MemoryManager& mm, common::ValueVector* nodeIDVector,
         std::vector<common::ValueVector*> outputVectors,
@@ -190,6 +204,13 @@ public:
     void reclaimStorage(PageAllocator& pageAllocator) const override;
 
     common::row_idx_t getNumTotalRows(const transaction::Transaction* transaction) override;
+    virtual common::row_idx_t getNumActiveBoundNodes(const transaction::Transaction* transaction,
+        common::RelDataDirection direction);
+    virtual std::vector<std::pair<common::offset_t, common::row_idx_t>> getDegreeEntries(
+        const transaction::Transaction* transaction, common::RelDataDirection direction);
+    virtual std::vector<std::pair<common::offset_t, common::row_idx_t>> getTopKDegrees(
+        const transaction::Transaction* transaction, common::RelDataDirection direction,
+        common::idx_t k);
 
     RelTableData* getDirectedTableData(common::RelDataDirection direction) const;
 

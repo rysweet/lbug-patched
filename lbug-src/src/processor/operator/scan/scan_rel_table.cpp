@@ -7,16 +7,32 @@
 #include "processor/execution_context.h"
 #include "storage/buffer_manager/memory_manager.h"
 #include "storage/local_storage/local_rel_table.h"
+#include "storage/table/arrow_node_table.h"
 #include "storage/table/arrow_rel_table.h"
 #include "storage/table/foreign_rel_table.h"
+#include "storage/table/ice_disk_node_table.h"
+#include "storage/table/ice_disk_rel_table.h"
 #include "storage/table/node_table.h"
-#include "storage/table/parquet_rel_table.h"
 
 using namespace lbug::common;
 using namespace lbug::storage;
 
 namespace lbug {
 namespace processor {
+
+static std::unique_ptr<TableScanState> createSourceNodeTableScanState(NodeTable* table,
+    ValueVector* nodeIDVector, const std::vector<ValueVector*>& outVectors,
+    MemoryManager* memoryManager) {
+    if (dynamic_cast<IceDiskNodeTable*>(table) != nullptr) {
+        return std::make_unique<IceDiskNodeTableScanState>(*memoryManager, nodeIDVector, outVectors,
+            nodeIDVector->state);
+    }
+    if (dynamic_cast<ArrowNodeTable*>(table) != nullptr) {
+        return std::make_unique<ArrowNodeTableScanState>(*memoryManager, nodeIDVector, outVectors,
+            nodeIDVector->state);
+    }
+    return std::make_unique<NodeTableScanState>(nodeIDVector, outVectors, nodeIDVector->state);
+}
 
 std::string ScanRelTablePrintInfo::toString() const {
     std::string result = "Tables: ";
@@ -76,15 +92,15 @@ void ScanRelTable::initLocalStateInternal(ResultSet* resultSet, ExecutionContext
     auto nbrNodeIDVector = outVectors[0];
     // Check if this is an external rel table and create the corresponding scan state.
     auto* arrowTable = dynamic_cast<storage::ArrowRelTable*>(tableInfo.table);
-    auto* parquetTable = dynamic_cast<storage::ParquetRelTable*>(tableInfo.table);
+    auto* iceDiskTable = dynamic_cast<storage::IceDiskRelTable*>(tableInfo.table);
     auto* foreignTable = dynamic_cast<storage::ForeignRelTable*>(tableInfo.table);
     if (arrowTable) {
         scanState =
             std::make_unique<storage::ArrowRelTableScanState>(*MemoryManager::Get(*clientContext),
                 boundNodeIDVector, outVectors, nbrNodeIDVector->state);
-    } else if (parquetTable) {
+    } else if (iceDiskTable) {
         scanState =
-            std::make_unique<storage::ParquetRelTableScanState>(*MemoryManager::Get(*clientContext),
+            std::make_unique<storage::IceDiskRelTableScanState>(*MemoryManager::Get(*clientContext),
                 boundNodeIDVector, outVectors, nbrNodeIDVector->state);
     } else if (foreignTable) {
         scanState =
@@ -95,6 +111,12 @@ void ScanRelTable::initLocalStateInternal(ResultSet* resultSet, ExecutionContext
             boundNodeIDVector, outVectors, nbrNodeIDVector->state);
     }
     tableInfo.initScanState(*scanState, outVectors, clientContext);
+    if (sourceNodeScanMode) {
+        sourceNodeOutVectors.clear();
+        for (auto& pos : sourceNodeScanInfo.outVectorsPos) {
+            sourceNodeOutVectors.push_back(resultSet->getValueVector(pos).get());
+        }
+    }
     if (sourceMode) {
         currentSourceTableIdx = 0;
         nextSourceOffset = 0;
@@ -102,7 +124,61 @@ void ScanRelTable::initLocalStateInternal(ResultSet* resultSet, ExecutionContext
     }
 }
 
+void ScanRelTable::initGlobalStateInternal(ExecutionContext* context) {
+    if (!sourceNodeScanMode) {
+        return;
+    }
+    DASSERT(sourceNodeTableInfos.size() == sourceNodeSharedStates.size());
+    for (auto i = 0u; i < sourceNodeTableInfos.size(); ++i) {
+        sourceNodeSharedStates[i]->initialize(
+            transaction::Transaction::Get(*context->clientContext),
+            sourceNodeTableInfos[i].table->ptrCast<NodeTable>(), *sourceNodeProgressSharedState);
+    }
+}
+
+static void initSourceNodeScanState(ScanNodeTableInfo& sourceInfo,
+    std::unique_ptr<TableScanState>& sourceScanState, ValueVector* boundNodeIDVector,
+    const std::vector<ValueVector*>& sourceNodeOutVectors, main::ClientContext* context) {
+    sourceScanState = createSourceNodeTableScanState(sourceInfo.table->ptrCast<NodeTable>(),
+        boundNodeIDVector, sourceNodeOutVectors, MemoryManager::Get(*context));
+    sourceInfo.initScanState(*sourceScanState, sourceNodeOutVectors, context);
+    if (dynamic_cast<IceDiskNodeTable*>(sourceInfo.table) ||
+        dynamic_cast<ArrowNodeTable*>(sourceInfo.table)) {
+        sourceInfo.table->initScanState(transaction::Transaction::Get(*context), *sourceScanState);
+    }
+}
+
 bool ScanRelTable::fetchNextBoundNodeBatch(transaction::Transaction* transaction) {
+    if (sourceNodeScanMode) {
+        auto* boundNodeIDVector = scanState->nodeIDVector;
+        auto context = transaction->getClientContext();
+        while (currentSourceTableIdx < sourceNodeTableInfos.size()) {
+            auto& sourceInfo = sourceNodeTableInfos[currentSourceTableIdx];
+            if (!sourceNodeScanState) {
+                initSourceNodeScanState(sourceInfo, sourceNodeScanState, boundNodeIDVector,
+                    sourceNodeOutVectors, context);
+            }
+            while (sourceInfo.table->scan(transaction, *sourceNodeScanState)) {
+                const auto outputSize = sourceNodeScanState->outState->getSelVector().getSelSize();
+                if (outputSize > 0) {
+                    sourceInfo.castColumns();
+                    sourceNodeScanState->outState->setToUnflat();
+                    tableInfo.table->initScanState(transaction, *scanState);
+                    return true;
+                }
+            }
+            sourceNodeSharedStates[currentSourceTableIdx]->nextMorsel(*sourceNodeScanState,
+                *sourceNodeProgressSharedState);
+            if (sourceNodeScanState->source == TableScanSource::NONE) {
+                currentSourceTableIdx++;
+                sourceNodeScanState = nullptr;
+            } else {
+                sourceInfo.table->initScanState(transaction, *sourceNodeScanState);
+            }
+        }
+        return false;
+    }
+
     auto* boundNodeIDVector = scanState->nodeIDVector;
     while (currentSourceTableIdx < sourceNodeTables.size()) {
         auto* nodeTable = sourceNodeTables[currentSourceTableIdx];
@@ -137,6 +213,7 @@ bool ScanRelTable::getNextTuplesInternal(ExecutionContext* context) {
             while (tableInfo.table->scan(transaction, *scanState)) {
                 const auto outputSize = scanState->outState->getSelVector().getSelSize();
                 if (outputSize > 0) {
+                    tableInfo.castColumns();
                     metrics->numOutputTuple.increase(outputSize);
                     return true;
                 }
@@ -150,7 +227,7 @@ bool ScanRelTable::getNextTuplesInternal(ExecutionContext* context) {
         while (tableInfo.table->scan(transaction, *scanState)) {
             const auto outputSize = scanState->outState->getSelVector().getSelSize();
             if (outputSize > 0) {
-                // No need to perform column cast because this is single table scan.
+                tableInfo.castColumns();
                 metrics->numOutputTuple.increase(outputSize);
                 return true;
             }

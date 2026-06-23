@@ -4,6 +4,7 @@
 
 #include "common/types/types.h"
 #include "storage/index/hash_index.h"
+#include "storage/predicate/column_predicate.h"
 #include "storage/table/node_group_collection.h"
 #include "storage/table/table.h"
 
@@ -91,6 +92,7 @@ struct IndexScanHelper {
 
     NodeTable* table;
     Index* index;
+    common::node_group_idx_t currentNodeGroupIdx = common::INVALID_NODE_GROUP_IDX;
 };
 
 class NodeTableVersionRecordHandler final : public VersionRecordHandler {
@@ -145,21 +147,29 @@ public:
 
     void addColumn(transaction::Transaction* transaction, TableAddColumnState& addColumnState,
         PageAllocator& pageAllocator) override;
-    bool isVisible(const transaction::Transaction* transaction, common::offset_t offset) const;
-    bool isVisibleNoLock(const transaction::Transaction* transaction,
+    virtual bool isVisible(const transaction::Transaction* transaction,
+        common::offset_t offset) const;
+    virtual bool isVisibleNoLock(const transaction::Transaction* transaction,
         common::offset_t offset) const;
 
-    bool lookupPK(const transaction::Transaction* transaction, common::ValueVector* keyVector,
-        uint64_t vectorPos, common::offset_t& result) const;
+    virtual bool lookupPK(const transaction::Transaction* transaction,
+        common::ValueVector* keyVector, uint64_t vectorPos, common::offset_t& result) const;
+    bool lookupPKRange(const transaction::Transaction* transaction,
+        common::ValueVector* lowerBoundVector, uint64_t lowerBoundPos, bool lowerInclusive,
+        common::ValueVector* upperBoundVector, uint64_t upperBoundPos, bool upperInclusive,
+        common::idx_t maxResults, std::vector<common::offset_t>& results) const;
 
     void addIndex(std::unique_ptr<Index> index);
+    void buildIndexAndAdd(main::ClientContext* context, std::unique_ptr<Index> index);
     void dropIndex(const std::string& name);
 
     common::column_id_t getPKColumnID() const { return pkColumnID; }
+    Index* tryGetPrimaryKeyIndex() const;
+    PrimaryKeyIndex* tryGetPKIndex() const;
     PrimaryKeyIndex* getPKIndex() const {
-        const auto index = getIndex(PrimaryKeyIndex::DEFAULT_NAME);
-        DASSERT(index.has_value());
-        return &index.value()->cast<PrimaryKeyIndex>();
+        auto* index = tryGetPKIndex();
+        DASSERT(index);
+        return index;
     }
     std::optional<std::reference_wrapper<IndexHolder>> getIndexHolder(const std::string& name);
     std::optional<Index*> getIndex(const std::string& name) const;
@@ -234,6 +244,8 @@ private:
     visible_func getVisibleFunc(const transaction::Transaction* transaction) const;
     common::DataChunk constructDataChunkForColumns(
         const std::vector<common::column_id_t>& columnIDs) const;
+    bool scanPKColumn(const transaction::Transaction* transaction, const common::Value& keyToLookup,
+        std::vector<ColumnPredicateSet> columnPredicateSets, common::offset_t& result) const;
     void scanIndexColumns(main::ClientContext* context, IndexScanHelper& scanHelper,
         const NodeGroupCollection& nodeGroups_) const;
 

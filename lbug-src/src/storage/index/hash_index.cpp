@@ -416,11 +416,6 @@ size_t HashIndex<T>::mergeSlot(PageAllocator& pageAllocator, const Transaction* 
 }
 
 template<typename T>
-void HashIndex<T>::bulkReserve(uint64_t newEntries) {
-    return localStorage->reserveInserts(newEntries);
-}
-
-template<typename T>
 HashIndex<T>::~HashIndex() = default;
 
 template<>
@@ -603,6 +598,23 @@ void PrimaryKeyIndex::delete_(ValueVector* keyVector) {
                 }
                 auto key = keyVector->getValue<T>(pos);
                 delete_(key);
+            }
+        },
+        [](auto) { UNREACHABLE_CODE; });
+}
+
+void PrimaryKeyIndex::discardPrimaryKey(ValueVector* keyVector) {
+    DASSERT(indexInfo.keyDataTypes.size() == 1);
+    TypeUtils::visit(
+        indexInfo.keyDataTypes[0],
+        [&]<IndexHashable T>(T) {
+            for (auto i = 0u; i < keyVector->state->getSelVector().getSelSize(); i++) {
+                auto pos = keyVector->state->getSelVector()[i];
+                if (keyVector->isNull(pos)) {
+                    continue;
+                }
+                auto key = keyVector->getValue<T>(pos);
+                discardLocal(key);
             }
         },
         [](auto) { UNREACHABLE_CODE; });

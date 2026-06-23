@@ -138,6 +138,8 @@ typedef struct {
     bool enable_checksums;
     // If true, multiple concurrent write transactions are allowed.
     bool enable_multi_writes;
+    // If true, node tables create the default primary-key hash index.
+    bool enable_default_hash_index;
 
 #if defined(__APPLE__)
     // The thread quality of service (QoS) for the worker threads.
@@ -416,6 +418,47 @@ LBUG_C_API lbug_state lbug_connection_prepare(lbug_connection* connection, const
 LBUG_C_API lbug_state lbug_connection_execute(lbug_connection* connection,
     lbug_prepared_statement* prepared_statement, lbug_query_result* out_query_result);
 /**
+ * @brief Creates an Arrow memory-backed node table from Arrow C Data Interface data.
+ *
+ * Ownership of schema and arrays is transferred to lbug on success or failure. The caller must not
+ * release them after this call.
+ */
+LBUG_C_API lbug_state lbug_connection_create_arrow_table(lbug_connection* connection,
+    const char* table_name, struct ArrowSchema* schema, struct ArrowArray* arrays,
+    uint64_t num_arrays, lbug_query_result* out_query_result);
+/**
+ * @brief Creates an Arrow memory-backed relationship table from Arrow C Data Interface data.
+ *
+ * The Arrow table must contain endpoint columns named "from" and "to". Ownership of schema and
+ * arrays is transferred to lbug on success or failure. The caller must not release them after this
+ * call.
+ */
+LBUG_C_API lbug_state lbug_connection_create_arrow_rel_table(lbug_connection* connection,
+    const char* table_name, const char* src_table_name, const char* dst_table_name,
+    struct ArrowSchema* schema, struct ArrowArray* arrays, uint64_t num_arrays,
+    lbug_query_result* out_query_result);
+/**
+ * @brief Creates a CSR Arrow memory-backed relationship table from Arrow C Data Interface data.
+ *
+ * The indices Arrow table must contain a destination offset column and any relationship property
+ * columns. The indptr Arrow table must contain one offset column. Ownership of schemas and arrays
+ * is transferred to lbug on success or failure. The caller must not release them after this call.
+ *
+ * @param dst_col_name Name of the destination offset column in the indices table. If NULL,
+ *                     defaults to "to".
+ */
+LBUG_C_API lbug_state lbug_connection_create_arrow_rel_table_csr(lbug_connection* connection,
+    const char* table_name, const char* src_table_name, const char* dst_table_name,
+    struct ArrowSchema* indices_schema, struct ArrowArray* indices_arrays,
+    uint64_t num_indices_arrays, struct ArrowSchema* indptr_schema,
+    struct ArrowArray* indptr_arrays, uint64_t num_indptr_arrays, const char* dst_col_name,
+    lbug_query_result* out_query_result);
+/**
+ * @brief Drops an Arrow memory-backed table.
+ */
+LBUG_C_API lbug_state lbug_connection_drop_arrow_table(lbug_connection* connection,
+    const char* table_name, lbug_query_result* out_query_result);
+/**
  * @brief Interrupts the current query execution in the connection.
  * @param connection The connection instance to interrupt.
  */
@@ -439,6 +482,10 @@ LBUG_C_API void lbug_prepared_statement_destroy(lbug_prepared_statement* prepare
  * @return the query is prepared successfully or not.
  */
 LBUG_C_API bool lbug_prepared_statement_is_success(lbug_prepared_statement* prepared_statement);
+/**
+ * @return true if the prepared statement only performs read operations.
+ */
+LBUG_C_API bool lbug_prepared_statement_is_read_only(lbug_prepared_statement* prepared_statement);
 /**
  * @brief Returns the error message if the prepared statement is not prepared successfully.
  * The caller is responsible for freeing the returned string with `lbug_destroy_string`.
@@ -993,6 +1040,12 @@ LBUG_C_API lbug_value* lbug_value_create_interval(lbug_interval_t val_);
  * @param val_ The string value of the value to create.
  */
 LBUG_C_API lbug_value* lbug_value_create_string(const char* val_);
+/**
+ * @brief Creates a value with JSON type and the given JSON string representation.
+ * Caller is responsible for destroying the returned value.
+ * @param val_ The JSON string value to create.
+ */
+LBUG_C_API lbug_value* lbug_value_create_json(const char* val_);
 /**
  * @brief Creates a value with UUID type and the given string representation.
  * Caller is responsible for destroying the returned value.

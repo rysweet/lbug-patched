@@ -2,6 +2,7 @@
 
 #include "function/aggregate/count.h"
 #include "function/aggregate/count_star.h"
+#include "function/aggregate/percentile_disc.h"
 #include "function/arithmetic/vector_arithmetic_functions.h"
 #include "function/array/vector_array_functions.h"
 #include "function/blob/vector_blob_functions.h"
@@ -85,19 +86,20 @@ FunctionCollection* FunctionCollection::getFunctions() {
         SCALAR_FUNCTION(LeftFunction), SCALAR_FUNCTION(LpadFunction),
         SCALAR_FUNCTION(LtrimFunction), SCALAR_FUNCTION(StartsWithFunction),
         SCALAR_FUNCTION_ALIAS(PrefixFunction), SCALAR_FUNCTION(RepeatFunction),
-        SCALAR_FUNCTION(ReverseFunction), SCALAR_FUNCTION(RightFunction),
-        SCALAR_FUNCTION(RpadFunction), SCALAR_FUNCTION(RtrimFunction),
-        SCALAR_FUNCTION(SubStrFunction), SCALAR_FUNCTION_ALIAS(SubstringFunction),
-        SCALAR_FUNCTION(EndsWithFunction), SCALAR_FUNCTION_ALIAS(SuffixFunction),
-        SCALAR_FUNCTION(TrimFunction), SCALAR_FUNCTION(UpperFunction),
-        SCALAR_FUNCTION_ALIAS(UCaseFunction), SCALAR_FUNCTION_ALIAS(ToUpperFunction),
-        SCALAR_FUNCTION(RegexpFullMatchFunction), SCALAR_FUNCTION(RegexpMatchesFunction),
-        SCALAR_FUNCTION(RegexpReplaceFunction), SCALAR_FUNCTION(RegexpExtractFunction),
-        SCALAR_FUNCTION(RegexpExtractAllFunction), SCALAR_FUNCTION(LevenshteinFunction),
-        SCALAR_FUNCTION(RegexpSplitToArrayFunction), SCALAR_FUNCTION(InitCapFunction),
-        SCALAR_FUNCTION(StringSplitFunction), SCALAR_FUNCTION_ALIAS(StrSplitFunction),
-        SCALAR_FUNCTION_ALIAS(StringToArrayFunction), SCALAR_FUNCTION(SplitPartFunction),
-        SCALAR_FUNCTION(InternalIDCreationFunction), SCALAR_FUNCTION(ConcatWSFunction),
+        SCALAR_FUNCTION(ReplaceFunction), SCALAR_FUNCTION(ReverseFunction),
+        SCALAR_FUNCTION(RightFunction), SCALAR_FUNCTION(RpadFunction),
+        SCALAR_FUNCTION(RtrimFunction), SCALAR_FUNCTION(SubStrFunction),
+        SCALAR_FUNCTION_ALIAS(SubstringFunction), SCALAR_FUNCTION(EndsWithFunction),
+        SCALAR_FUNCTION_ALIAS(SuffixFunction), SCALAR_FUNCTION(TrimFunction),
+        SCALAR_FUNCTION(UpperFunction), SCALAR_FUNCTION_ALIAS(UCaseFunction),
+        SCALAR_FUNCTION_ALIAS(ToUpperFunction), SCALAR_FUNCTION(RegexpFullMatchFunction),
+        SCALAR_FUNCTION(RegexpMatchesFunction), SCALAR_FUNCTION(RegexpReplaceFunction),
+        SCALAR_FUNCTION(RegexpExtractFunction), SCALAR_FUNCTION(RegexpExtractAllFunction),
+        SCALAR_FUNCTION(LevenshteinFunction), SCALAR_FUNCTION(RegexpSplitToArrayFunction),
+        SCALAR_FUNCTION(InitCapFunction), SCALAR_FUNCTION(StringSplitFunction),
+        SCALAR_FUNCTION_ALIAS(StrSplitFunction), SCALAR_FUNCTION_ALIAS(StringToArrayFunction),
+        SCALAR_FUNCTION(SplitPartFunction), SCALAR_FUNCTION(InternalIDCreationFunction),
+        SCALAR_FUNCTION(ConcatWSFunction),
 
         // Array Functions
         SCALAR_FUNCTION(ArrayValueFunction), SCALAR_FUNCTION(ArrayCrossProductFunction),
@@ -217,18 +219,19 @@ FunctionCollection* FunctionCollection::getFunctions() {
         AGGREGATE_FUNCTION(CountStarFunction), AGGREGATE_FUNCTION(CountFunction),
         AGGREGATE_FUNCTION(AggregateSumFunction), AGGREGATE_FUNCTION(AggregateAvgFunction),
         AGGREGATE_FUNCTION(AggregateMinFunction), AGGREGATE_FUNCTION(AggregateMaxFunction),
-        AGGREGATE_FUNCTION(CollectFunction),
+        AGGREGATE_FUNCTION(CollectFunction), AGGREGATE_FUNCTION(AggregatePercentileDiscFunction),
 
         // Table functions
         TABLE_FUNCTION(CurrentSettingFunction), TABLE_FUNCTION(CatalogVersionFunction),
-        TABLE_FUNCTION(DBVersionFunction), TABLE_FUNCTION(ShowTablesFunction),
-        TABLE_FUNCTION(ShowGraphsFunction), TABLE_FUNCTION(FreeSpaceInfoFunction),
-        TABLE_FUNCTION(ShowWarningsFunction), TABLE_FUNCTION(TableInfoFunction),
-        TABLE_FUNCTION(ShowConnectionFunction), TABLE_FUNCTION(StatsInfoFunction),
-        TABLE_FUNCTION(StorageInfoFunction), TABLE_FUNCTION(ShowAttachedDatabasesFunction),
-        TABLE_FUNCTION(ShowSequencesFunction), TABLE_FUNCTION(ShowFunctionsFunction),
-        TABLE_FUNCTION(BMInfoFunction), TABLE_FUNCTION(FileInfoFunction),
-        TABLE_FUNCTION(DiskSizeInfoFunction), TABLE_FUNCTION(ShowLoadedExtensionsFunction),
+        TABLE_FUNCTION(DBVersionFunction), TABLE_FUNCTION(StorageVersionFunction),
+        TABLE_FUNCTION(ShowTablesFunction), TABLE_FUNCTION(ShowGraphsFunction),
+        TABLE_FUNCTION(FreeSpaceInfoFunction), TABLE_FUNCTION(ShowWarningsFunction),
+        TABLE_FUNCTION(TableInfoFunction), TABLE_FUNCTION(ShowConnectionFunction),
+        TABLE_FUNCTION(StatsInfoFunction), TABLE_FUNCTION(StorageInfoFunction),
+        TABLE_FUNCTION(ShowAttachedDatabasesFunction), TABLE_FUNCTION(ShowSequencesFunction),
+        TABLE_FUNCTION(ShowFunctionsFunction), TABLE_FUNCTION(BMInfoFunction),
+        TABLE_FUNCTION(FileInfoFunction), TABLE_FUNCTION(DiskSizeInfoFunction),
+        TABLE_FUNCTION(ShowLoadedExtensionsFunction),
         TABLE_FUNCTION(ShowOfficialExtensionsFunction), TABLE_FUNCTION(ShowIndexesFunction),
         TABLE_FUNCTION(ShowProjectedGraphsFunction), TABLE_FUNCTION(ProjectedGraphInfoFunction),
         TABLE_FUNCTION(ShowMacrosFunction),

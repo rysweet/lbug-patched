@@ -1,10 +1,9 @@
 #include "processor/operator/scan/scan_multi_rel_tables.h"
 
-#include "common/exception/runtime.h"
 #include "processor/execution_context.h"
 #include "storage/local_storage/local_storage.h"
 #include "storage/table/arrow_rel_table.h"
-#include "storage/table/parquet_rel_table.h"
+#include "storage/table/ice_disk_rel_table.h"
 
 using namespace lbug::common;
 using namespace lbug::storage;
@@ -26,6 +25,20 @@ bool DirectionInfo::needFlip(RelDataDirection relDataDirection) const {
 bool RelTableCollectionScanner::scan(main::ClientContext* context, RelTableScanState& scanState,
     const std::vector<ValueVector*>& outVectors) {
     auto transaction = Transaction::Get(*context);
+    auto initNextTable = [&]() -> bool {
+        currentTableIdx = nextTableIdx;
+        if (currentTableIdx == relInfos.size()) {
+            return false;
+        }
+        auto& currentInfo = relInfos[currentTableIdx];
+        currentInfo.initScanState(scanState, outVectors, context);
+        currentInfo.table->initScanState(transaction, scanState, currentTableIdx == 0);
+        nextTableIdx++;
+        return true;
+    };
+    if (currentTableIdx == INVALID_IDX && !initNextTable()) {
+        return false;
+    }
     while (true) {
         auto& relInfo = relInfos[currentTableIdx];
         if (relInfo.table->scan(transaction, scanState)) {
@@ -40,14 +53,9 @@ bool RelTableCollectionScanner::scan(main::ClientContext* context, RelTableScanS
                 return true;
             }
         } else {
-            currentTableIdx = nextTableIdx;
-            if (currentTableIdx == relInfos.size()) {
+            if (!initNextTable()) {
                 return false;
             }
-            auto& currentInfo = relInfos[currentTableIdx];
-            currentInfo.initScanState(scanState, outVectors, context);
-            currentInfo.table->initScanState(transaction, scanState, currentTableIdx == 0);
-            nextTableIdx++;
         }
     }
 }
@@ -60,35 +68,32 @@ void ScanMultiRelTable::initLocalStateInternal(ResultSet* resultSet, ExecutionCo
 
     // Check if any table in any scanner is an external rel table with a custom scan state.
     bool hasArrowTable = false;
-    bool hasParquetTable = false;
+    bool hasIceDiskTable = false;
     for (auto& [_, scanner] : scanners) {
         for (auto& relInfo : scanner.relInfos) {
             if (dynamic_cast<storage::ArrowRelTable*>(relInfo.table) != nullptr) {
                 hasArrowTable = true;
                 break;
             }
-            if (dynamic_cast<storage::ParquetRelTable*>(relInfo.table) != nullptr) {
-                hasParquetTable = true;
+            if (dynamic_cast<storage::IceDiskRelTable*>(relInfo.table) != nullptr) {
+                hasIceDiskTable = true;
                 break;
             }
         }
-        if (hasArrowTable || hasParquetTable) {
+        if (hasArrowTable || hasIceDiskTable) {
             break;
         }
     }
 
-    // Create appropriate scan state type
-    if (hasArrowTable && hasParquetTable) {
-        throw RuntimeException(
-            "Scanning mixed Arrow-backed and Parquet-backed rel tables in one operator is not "
-            "supported");
+    // IceDisk scan state extends the common rel scan state and Arrow stores its per-table state
+    // there, so one scan state can now cover IceDisk, Arrow, and native rel tables.
+    if (hasIceDiskTable) {
+        scanState =
+            std::make_unique<storage::IceDiskRelTableScanState>(*MemoryManager::Get(*clientContext),
+                boundNodeIDVector, outVectors, nbrNodeIDVector->state);
     } else if (hasArrowTable) {
         scanState =
             std::make_unique<storage::ArrowRelTableScanState>(*MemoryManager::Get(*clientContext),
-                boundNodeIDVector, outVectors, nbrNodeIDVector->state);
-    } else if (hasParquetTable) {
-        scanState =
-            std::make_unique<storage::ParquetRelTableScanState>(*MemoryManager::Get(*clientContext),
                 boundNodeIDVector, outVectors, nbrNodeIDVector->state);
     } else {
         scanState = std::make_unique<RelTableScanState>(*MemoryManager::Get(*clientContext),

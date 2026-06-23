@@ -12,7 +12,7 @@
 namespace lbug {
 namespace storage {
 
-// Abstract base class for columnar-format relationship tables (Parquet, Arrow, etc.)
+// Abstract base class for columnar-format relationship tables (Icebug-Disk, Arrow, etc.)
 class ColumnarRelTableBase : public RelTable {
 public:
     ColumnarRelTableBase(catalog::RelGroupCatalogEntry* relGroupEntry,
@@ -44,6 +44,13 @@ public:
     }
 
     common::row_idx_t getNumTotalRows(const transaction::Transaction* transaction) override;
+    common::row_idx_t getNumActiveBoundNodes(const transaction::Transaction* transaction,
+        common::RelDataDirection direction) override;
+    std::vector<std::pair<common::offset_t, common::row_idx_t>> getDegreeEntries(
+        const transaction::Transaction* transaction, common::RelDataDirection direction) override;
+    std::vector<std::pair<common::offset_t, common::row_idx_t>> getTopKDegrees(
+        const transaction::Transaction* transaction, common::RelDataDirection direction,
+        common::idx_t k) override;
 
 protected:
     catalog::RelGroupCatalogEntry* relGroupEntry;
@@ -53,19 +60,13 @@ protected:
     virtual std::string getColumnarFormatName() const = 0;
     virtual common::row_idx_t getTotalRowCount(
         const transaction::Transaction* transaction) const = 0;
-
-    // Helper for constructing storage paths for CSR format
-    struct CSRFilePaths {
-        std::string indices;
-        std::string indptr;
-        std::string metadata;
-    };
-
-    CSRFilePaths constructCSRPaths(const std::string& prefix, const std::string& suffix) const {
-        std::string relName = relGroupEntry->getName();
-        return {prefix + "_indices_" + relName + suffix, prefix + "_indptr_" + relName + suffix,
-            prefix + "_metadata_" + relName + suffix};
-    }
+    virtual common::row_idx_t getActiveBoundNodeCount(const transaction::Transaction* transaction,
+        common::RelDataDirection direction) const = 0;
+    virtual std::vector<std::pair<common::offset_t, common::row_idx_t>> getAllDegreeEntries(
+        const transaction::Transaction* transaction, common::RelDataDirection direction) const = 0;
+    virtual std::vector<std::pair<common::offset_t, common::row_idx_t>> getTopKDegreeEntries(
+        const transaction::Transaction* transaction, common::RelDataDirection direction,
+        common::idx_t k) const = 0;
 
     // Helper for finding source node in CSR format
     // Subclasses should cache indptr data and provide it via this interface

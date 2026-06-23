@@ -26,6 +26,8 @@ std::string LogicalOperatorUtils::logicalOperatorTypeToString(LogicalOperatorTyp
         return "COUNT_REL_TABLE";
     case LogicalOperatorType::CREATE_MACRO:
         return "CREATE_MACRO";
+    case LogicalOperatorType::CREATE_INDEX:
+        return "CREATE_INDEX";
     case LogicalOperatorType::CREATE_SEQUENCE:
         return "CREATE_SEQUENCE";
     case LogicalOperatorType::CREATE_TABLE:
@@ -90,6 +92,8 @@ std::string LogicalOperatorUtils::logicalOperatorTypeToString(LogicalOperatorTyp
         return "PROJECTION";
     case LogicalOperatorType::RECURSIVE_EXTEND:
         return "RECURSIVE_EXTEND";
+    case LogicalOperatorType::REL_DEGREE_TABLE:
+        return "REL_DEGREE_TABLE";
     case LogicalOperatorType::SCAN_NODE_TABLE:
         return "SCAN_NODE_TABLE";
     case LogicalOperatorType::SEMI_MASKER:

@@ -123,9 +123,11 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
         BOOL rc = LockFileEx(handle, dwFlags, 0 /*reserved*/, 1 /*numBytesLow*/, 0 /*numBytesHigh*/,
             &overlapped);
         if (!rc) {
-            throw IOException(
-                "Could not set lock on file : " + fullPath + "\n" +
-                "See the docs: https://docs.ladybugdb.com/concurrency for more information.");
+            auto error = GetLastError();
+            throw IOException("Could not set lock on file : " + fullPath +
+                              " (Error: " + std::to_string(error) + ")\n" +
+                              "See the docs: https://docs.ladybugdb.com/concurrency for more "
+                              "information.");
         }
     }
     return std::make_unique<LocalFileInfo>(fullPath, handle, this);
@@ -143,9 +145,29 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
         fl.l_len = 0;
         int rc = fcntl(fd, F_SETLK, &fl);
         if (rc == -1) {
-            throw IOException(
-                "Could not set lock on file : " + fullPath + "\n" +
-                "See the docs: https://docs.ladybugdb.com/concurrency for more information.");
+            int original_errno = errno;
+            if (original_errno == EAGAIN || original_errno == EACCES) {
+                struct flock get_fl {};
+                memset(&get_fl, 0, sizeof get_fl);
+                get_fl.l_type = flags.lockType == FileLockType::READ_LOCK ? F_RDLCK : F_WRLCK;
+                get_fl.l_whence = SEEK_SET;
+                get_fl.l_start = 0;
+                get_fl.l_len = 0;
+                if (fcntl(fd, F_GETLK, &get_fl) != -1) {
+                    if (get_fl.l_type != F_UNLCK) {
+                        throw IOException(
+                            "Could not set lock on file : " + fullPath + " (Lock is held by PID " +
+                            std::to_string(get_fl.l_pid) + ")\n" +
+                            "See the docs: https://docs.ladybugdb.com/concurrency for more "
+                            "information.");
+                    }
+                }
+            }
+            errno = original_errno;
+            throw IOException("Could not set lock on file : " + fullPath +
+                              " (Error: " + posixErrMessage() + ")\n" +
+                              "See the docs: https://docs.ladybugdb.com/concurrency for more "
+                              "information.");
         }
     }
     return std::make_unique<LocalFileInfo>(fullPath, fd, this);
@@ -392,7 +414,7 @@ bool LocalFileSystem::isLocalPath(const std::string& path) {
     return path.rfind("s3://", 0) != 0 && path.rfind("gs://", 0) != 0 &&
            path.rfind("gcs://", 0) != 0 && path.rfind("http://", 0) != 0 &&
            path.rfind("https://", 0) != 0 && path.rfind("az://", 0) != 0 &&
-           path.rfind("abfss://", 0) != 0;
+           path.rfind("abfss://", 0) != 0 && path.rfind("xet://", 0) != 0;
 }
 
 void LocalFileSystem::readFromFile(FileInfo& fileInfo, void* buffer, uint64_t numBytes,

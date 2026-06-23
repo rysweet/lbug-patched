@@ -1,7 +1,10 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -10,8 +13,9 @@
 
 #include "common/api.h"
 #include "common/database_lifecycle_manager.h"
+#include "common/types/types.h"
+#include "common/types/value/value.h"
 #include "lbug_fwd.h"
-#include "main/db_config.h"
 
 namespace lbug {
 namespace common {
@@ -31,6 +35,7 @@ class StorageExtension;
 } // namespace storage
 
 namespace main {
+struct DBConfig;
 class DatabaseManager;
 /**
  * @brief Stores runtime configuration for creating or opening a Database
@@ -64,12 +69,15 @@ struct LBUG_API SystemConfig {
      * WAL file.
      * @param enableMultiWrites If true, multiple concurrent write transactions are allowed.
      * Default to false.
+     * @param enableDefaultHashIndex If true, node tables create the default primary-key hash
+     * index.
      */
     explicit SystemConfig(uint64_t bufferPoolSize = -1u, uint64_t maxNumThreads = 0,
         bool enableCompression = true, bool readOnly = false, uint64_t maxDBSize = -1u,
         bool autoCheckpoint = true, uint64_t checkpointThreshold = 16777216 /* 16MB */,
         bool forceCheckpointOnClose = true, bool throwOnWalReplayFailure = true,
-        bool enableChecksums = true, bool enableMultiWrites = false
+        bool enableChecksums = true, bool enableMultiWrites = false,
+        bool enableDefaultHashIndex = true
 #if defined(__APPLE__)
         ,
         uint32_t threadQos = QOS_CLASS_DEFAULT
@@ -87,6 +95,7 @@ struct LBUG_API SystemConfig {
     bool throwOnWalReplayFailure;
     bool enableChecksums;
     bool enableMultiWrites;
+    bool enableDefaultHashIndex;
 #if defined(__APPLE__)
     uint32_t threadQos;
 #endif
@@ -144,7 +153,8 @@ public:
 
     catalog::Catalog* getCatalog() { return catalog.get(); }
 
-    const DBConfig& getConfig() const { return dbConfig; }
+    LBUG_API bool isReadOnly() const;
+    LBUG_API bool isMultiWritesEnabled() const;
 
     std::vector<storage::StorageExtension*> getStorageExtensions();
 
@@ -184,7 +194,7 @@ private:
 
 private:
     std::string databasePath;
-    DBConfig dbConfig;
+    std::unique_ptr<DBConfig> dbConfig;
     std::unique_ptr<common::VirtualFileSystem> vfs;
     std::unique_ptr<storage::BufferManager> bufferManager;
     std::unique_ptr<storage::MemoryManager> memoryManager;

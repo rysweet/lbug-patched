@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/catalog_entry_type.h"
 #include "common/api.h"
@@ -40,6 +42,13 @@ struct ExtensionRepoInfo {
     std::string repoURL;
 };
 
+struct ExtensionProxyConfig {
+    std::string host;
+    int port;
+    std::string username;
+    std::string password;
+};
+
 enum class ExtensionSource : uint8_t { OFFICIAL, USER, STATIC_LINKED };
 
 struct ExtensionSourceUtils {
@@ -67,9 +76,9 @@ struct LBUG_API ExtensionUtils {
 
     static constexpr const char* EXTENSION_FILE_NAME = "lib{}.{}";
 
-    static constexpr const char* OFFICIAL_EXTENSION[] = {"HTTPFS", "POSTGRES", "DUCKDB", "JSON",
-        "SQLITE", "FTS", "DELTA", "ICEBERG", "AZURE", "UNITY_CATALOG", "VECTOR", "NEO4J", "ALGO",
-        "LLM"};
+    static constexpr const char* OFFICIAL_EXTENSION[] = {"ADBC", "HTTPFS", "POSTGRES", "DUCKDB",
+        "JSON", "SQLITE", "FTS", "DELTA", "ICEBERG", "AZURE", "UNITY_CATALOG", "VECTOR", "NEO4J",
+        "ALGO", "LLM"};
 
     static constexpr const char* EXTENSION_LOADER_SUFFIX = "_loader";
 
@@ -86,6 +95,10 @@ struct LBUG_API ExtensionUtils {
 
     static ExtensionRepoInfo getSharedLibRepoInfo(const std::string& fileName,
         const std::string& extensionRepo);
+
+    static std::optional<ExtensionProxyConfig> getProxyConfigForURL(const std::string& url);
+
+    static std::optional<ExtensionProxyConfig> parseProxyConfig(const std::string& proxyURL);
 
     static std::string getExtensionFileName(const std::string& name);
 

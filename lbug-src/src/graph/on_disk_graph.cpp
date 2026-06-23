@@ -18,6 +18,7 @@
 #include "storage/local_storage/local_storage.h"
 #include "storage/storage_manager.h"
 #include "storage/storage_utils.h"
+#include "storage/table/ice_disk_rel_table.h"
 #include "storage/table/node_table.h"
 #include "storage/table/rel_table.h"
 
@@ -126,8 +127,16 @@ OnDiskGraphNbrScanState::OnDiskGraphNbrScanState(ClientContext* context,
             auto pos = DataPos(schema.getExpressionPos(*property));
             outVectors.push_back(resultSet.getValueVector(pos).get());
         }
-        auto scanState = std::make_unique<RelTableScanState>(*MemoryManager::Get(*context),
-            srcNodeIDVector.get(), outVectors, dstNodeIDVector->state, randomLookup);
+
+        std::unique_ptr<RelTableScanState> scanState;
+        if (dynamic_cast<IceDiskRelTable*>(table) != nullptr) {
+            scanState = std::make_unique<IceDiskRelTableScanState>(*mm, srcNodeIDVector.get(),
+                outVectors, state);
+        } else {
+            scanState = std::make_unique<RelTableScanState>(*MemoryManager::Get(*context),
+                srcNodeIDVector.get(), outVectors, dstNodeIDVector->state, randomLookup);
+        }
+
         scanState->setToTable(transaction::Transaction::Get(*context), table, columnIDs, {},
             dataDirection);
         directedIterators.emplace_back(context, table, std::move(scanState));
@@ -200,6 +209,7 @@ std::unique_ptr<NbrScanState> OnDiskGraph::prepareRelScan(const TableCatalogEntr
     auto& info = graphEntry.getRelInfo(entry.getTableID());
     auto state = std::make_unique<OnDiskGraphNbrScanState>(context, entry, relTableID,
         info.predicate, relProperties, randomLookup);
+    state->nbrNodeTable = nodeIDToNodeTable.at(nbrTableID);
     if (nodeOffsetMaskMap != nullptr && nodeOffsetMaskMap->containsTableID(nbrTableID)) {
         state->nbrNodeMask = nodeOffsetMaskMap->getOffsetMask(nbrTableID);
     }
@@ -235,7 +245,7 @@ std::unique_ptr<VertexScanState> OnDiskGraph::prepareVertexScan(TableCatalogEntr
 }
 
 bool OnDiskGraphNbrScanState::InnerIterator::next(evaluator::ExpressionEvaluator* predicate,
-    SemiMask* nbrNodeMask_) {
+    SemiMask* nbrNodeMask_, NodeTable* nbrNodeTable_) {
     bool hasAtLeastOneSelectedValue = false;
     do {
         restoreSelVector(*tableScanState->outState);
@@ -261,6 +271,19 @@ bool OnDiskGraphNbrScanState::InnerIterator::next(evaluator::ExpressionEvaluator
             tableScanState->outState->getSelVectorUnsafe().setToFiltered(selectedSize);
             hasAtLeastOneSelectedValue = selectedSize > 0;
         }
+        if (nbrNodeTable_ != nullptr) {
+            auto selectedSize = 0u;
+            auto buffer = tableScanState->outState->getSelVectorUnsafe().getMutableBuffer();
+            auto transaction = transaction::Transaction::Get(*context);
+            for (auto i = 0u; i < tableScanState->outState->getSelSize(); ++i) {
+                auto pos = tableScanState->outState->getSelVector()[i];
+                buffer[selectedSize] = pos;
+                auto nbrNodeID = tableScanState->outputVectors[0]->getValue<nodeID_t>(pos);
+                selectedSize += nbrNodeTable_->isVisible(transaction, nbrNodeID.offset);
+            }
+            tableScanState->outState->getSelVectorUnsafe().setToFiltered(selectedSize);
+            hasAtLeastOneSelectedValue = selectedSize > 0;
+        }
     } while (!hasAtLeastOneSelectedValue);
     return true;
 }
@@ -282,7 +305,7 @@ void OnDiskGraphNbrScanState::startScan(RelDataDirection direction) {
 
 bool OnDiskGraphNbrScanState::next() {
     DASSERT(currentIter != nullptr);
-    if (currentIter->next(relPredicateEvaluator.get(), nbrNodeMask)) {
+    if (currentIter->next(relPredicateEvaluator.get(), nbrNodeMask, nbrNodeTable)) {
         return true;
     }
     return false;

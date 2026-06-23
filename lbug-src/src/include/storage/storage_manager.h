@@ -12,6 +12,10 @@ namespace main {
 class Database;
 } // namespace main
 
+namespace common {
+class VirtualFileSystem;
+} // namespace common
+
 namespace catalog {
 class CatalogEntry;
 class Catalog;
@@ -31,7 +35,8 @@ struct DatabaseHeader;
 class LBUG_API StorageManager {
 public:
     StorageManager(const std::string& databasePath, bool readOnly, bool enableChecksums,
-        MemoryManager& memoryManager, bool enableCompression, common::VirtualFileSystem* vfs);
+        MemoryManager& memoryManager, bool enableCompression, bool enableDefaultHashIndex,
+        common::VirtualFileSystem* vfs);
     ~StorageManager();
 
     Table* getTable(common::table_id_t tableID);
@@ -39,13 +44,14 @@ public:
     static void recover(main::ClientContext& clientContext, bool throwOnWalReplayFailure,
         bool enableChecksums);
 
-    void createTable(catalog::TableCatalogEntry* entry);
-    void addRelTable(catalog::RelGroupCatalogEntry* entry,
-        const catalog::RelTableCatalogInfo& info);
+    void createTable(catalog::TableCatalogEntry* entry, main::ClientContext* context = nullptr);
+    void addRelTable(catalog::RelGroupCatalogEntry* entry, const catalog::RelTableCatalogInfo& info,
+        main::ClientContext* context = nullptr);
 
-    bool checkpoint(main::ClientContext* context, PageAllocator& pageAllocator);
-    bool checkpoint(main::ClientContext* context, const transaction::Transaction& snapshotTxn,
-        PageAllocator& pageAllocator,
+    bool checkpoint(main::ClientContext* context, const catalog::Catalog& catalog,
+        PageAllocator& pageAllocator);
+    bool checkpoint(main::ClientContext* context, const catalog::Catalog& catalog,
+        const transaction::Transaction& snapshotTxn, PageAllocator& pageAllocator,
         const std::unordered_map<common::table_id_t, uint64_t>& epochWatermarks);
 
     // Capture the current changeEpoch for every table. Must be called under the
@@ -61,6 +67,10 @@ public:
     bool isReadOnly() const { return readOnly; }
     bool compressionEnabled() const { return enableCompression; }
     bool isInMemory() const { return inMemory; }
+    bool defaultHashIndexEnabled() const { return enableDefaultHashIndex; }
+    void setDefaultHashIndexEnabled(bool enabled) { enableDefaultHashIndex = enabled; }
+
+    common::VirtualFileSystem* getVFS() const { return vfs_; }
 
     void registerIndexType(IndexType indexType) {
         registeredIndexTypes.push_back(std::move(indexType));
@@ -91,9 +101,11 @@ public:
     static StorageManager* Get(const main::ClientContext& context);
 
 private:
-    void createNodeTable(catalog::NodeTableCatalogEntry* entry);
+    void createNodeTable(catalog::NodeTableCatalogEntry* entry,
+        main::ClientContext* context = nullptr);
 
-    void createRelTableGroup(catalog::RelGroupCatalogEntry* entry);
+    void createRelTableGroup(catalog::RelGroupCatalogEntry* entry,
+        main::ClientContext* context = nullptr);
 
     void reclaimDroppedTables(const catalog::Catalog& catalog);
 
@@ -108,9 +120,11 @@ private:
     std::unique_ptr<WAL> wal;
     std::unique_ptr<ShadowFile> shadowFile;
     bool enableCompression;
+    bool enableDefaultHashIndex;
     bool inMemory;
     std::vector<IndexType> registeredIndexTypes;
     std::unordered_map<common::table_id_t, std::string> tableNameCache;
+    common::VirtualFileSystem* vfs_; // non-owning, owned by Database
 };
 
 } // namespace storage

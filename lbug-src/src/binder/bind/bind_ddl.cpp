@@ -2,17 +2,23 @@
 
 #include "binder/binder.h"
 #include "binder/ddl/bound_alter.h"
+#include "binder/ddl/bound_create_index.h"
 #include "binder/ddl/bound_create_sequence.h"
 #include "binder/ddl/bound_create_table.h"
 #include "binder/ddl/bound_create_type.h"
 #include "binder/ddl/bound_drop.h"
 #include "binder/expression_visitor.h"
 #include "catalog/catalog.h"
+#include "catalog/catalog_entry/index_catalog_entry.h"
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
+#include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "catalog/catalog_entry/sequence_catalog_entry.h"
+#include "common/constants.h"
 #include "common/enums/extend_direction_util.h"
+#include "common/enums/storage_format.h"
 #include "common/exception/binder.h"
 #include "common/exception/message.h"
+#include "common/string_utils.h"
 #include "common/system_config.h"
 #include "common/types/types.h"
 #include "function/cast/functions/cast_from_string_functions.h"
@@ -21,6 +27,7 @@
 #include "main/client_context.h"
 #include "main/database_manager.h"
 #include "parser/ddl/alter.h"
+#include "parser/ddl/create_index.h"
 #include "parser/ddl/create_sequence.h"
 #include "parser/ddl/create_table.h"
 #include "parser/ddl/create_table_info.h"
@@ -28,6 +35,8 @@
 #include "parser/ddl/drop.h"
 #include "parser/expression/parsed_function_expression.h"
 #include "parser/expression/parsed_literal_expression.h"
+#include "storage/index/hash_index.h"
+#include "storage/storage_manager.h"
 #include "transaction/transaction.h"
 #include <format>
 
@@ -37,6 +46,20 @@ using namespace lbug::catalog;
 
 namespace lbug {
 namespace binder {
+
+std::string BoundCreateIndexInfo::toString() const {
+    return std::format("{} INDEX {} ON {}({})", indexType, indexName, tableName, propertyName);
+}
+
+static std::string getExistingIndexName(Catalog* catalog, transaction::Transaction* transaction,
+    common::table_id_t tableID, common::property_id_t propertyID) {
+    for (auto* indexEntry : catalog->getIndexEntries(transaction, tableID)) {
+        if (indexEntry->containsPropertyID(propertyID)) {
+            return indexEntry->getIndexName();
+        }
+    }
+    return "";
+}
 
 static void validatePropertyName(const std::vector<PropertyDefinition>& definitions) {
     case_insensitve_set_t nameSet;
@@ -181,14 +204,23 @@ static ExtendDirection getStorageDirection(const case_insensitive_map_t<Value>& 
     return DEFAULT_EXTEND_DIRECTION;
 }
 
+static StorageFormat getStorageFormat(const case_insensitive_map_t<Value>& options) {
+    if (options.contains(TableOptionConstants::STORAGE_FORMAT_OPTION)) {
+        return StorageFormatUtils::fromString(
+            options.at(TableOptionConstants::STORAGE_FORMAT_OPTION).toString());
+    }
+    return StorageFormat::NONE;
+}
+
 BoundCreateTableInfo Binder::bindCreateNodeTableInfo(const CreateTableInfo* info) {
     auto propertyDefinitions = bindPropertyDefinitions(info->propertyDefinitions, info->tableName);
     auto& extraInfo = info->extraInfo->constCast<ExtraCreateNodeTableInfo>();
     validatePrimaryKey(extraInfo.pKName, propertyDefinitions);
     auto boundOptions = bindParsingOptions(extraInfo.options);
     auto storage = getStorage(boundOptions);
+    auto storageFormat = getStorageFormat(boundOptions);
     auto boundExtraInfo = std::make_unique<BoundExtraCreateNodeTableInfo>(extraInfo.pKName,
-        std::move(propertyDefinitions), std::move(storage));
+        std::move(propertyDefinitions), std::move(storage), std::move(storageFormat));
     return BoundCreateTableInfo(CatalogEntryType::NODE_TABLE_ENTRY, info->tableName,
         info->onConflict, std::move(boundExtraInfo), clientContext->useInternalCatalogEntry());
 }
@@ -211,15 +243,17 @@ BoundCreateTableInfo Binder::bindCreateRelTableGroupInfo(const CreateTableInfo* 
     auto boundOptions = bindParsingOptions(extraInfo.options);
     auto storageDirection = getStorageDirection(boundOptions);
     auto storage = getStorage(boundOptions);
+    auto storageFormat = getStorageFormat(boundOptions);
     std::optional<function::TableFunction> scanFunction = std::nullopt;
     std::optional<std::unique_ptr<function::TableFuncBindData>> scanBindData = std::nullopt;
     std::string foreignDatabaseName;
     if (!storage.empty()) {
         auto dotPos = storage.find('.');
         // Check if storage is database.table format by verifying the attached database exists
+        // Handle special case where icebug-disk storage could contain a dot
         // Otherwise, treat as file path (e.g., "dataset/demo-db/icebug-disk/demo" or
         // "data.parquet")
-        if (dotPos != std::string::npos) {
+        if (storageFormat != StorageFormat::ICEBUG_DISK && dotPos != std::string::npos) {
             std::string dbName = storage.substr(0, dotPos);
             std::string tableName = storage.substr(dotPos + 1);
             if (!dbName.empty()) {
@@ -310,6 +344,24 @@ BoundCreateTableInfo Binder::bindCreateRelTableGroupInfo(const CreateTableInfo* 
             }
         }
 
+        bool isSrcIcebugDisk = srcEntry->getType() == CatalogEntryType::NODE_TABLE_ENTRY ?
+                                   srcEntry->ptrCast<NodeTableCatalogEntry>()->getStorageFormat() ==
+                                       StorageFormat::ICEBUG_DISK :
+                                   false;
+        bool isDstIcebugDisk = dstEntry->getType() == CatalogEntryType::NODE_TABLE_ENTRY ?
+                                   dstEntry->ptrCast<NodeTableCatalogEntry>()->getStorageFormat() ==
+                                       StorageFormat::ICEBUG_DISK :
+                                   false;
+        bool isRelIcebugDisk = (storageFormat == StorageFormat::ICEBUG_DISK);
+
+        // We don't allow mixing icebug-disk tables with non-icebug-disk tables
+        // We only allow icebug-disk rel tables to connect icebug-disk node tables
+        if ((!isRelIcebugDisk && (isSrcIcebugDisk || isDstIcebugDisk)) ||
+            (isRelIcebugDisk && (!isSrcIcebugDisk || !isDstIcebugDisk))) {
+            throw BinderException(
+                "Cannot mix icebug-disk tables with non-icebug-disk tables in CREATE REL TABLE.");
+        }
+
         // Use the actual shadow table IDs, not FOREIGN_TABLE_ID
         // The shadow tables allow the query planner to distinguish between different node tables
         auto srcTableID = srcEntry->getTableID();
@@ -324,8 +376,8 @@ BoundCreateTableInfo Binder::bindCreateRelTableGroupInfo(const CreateTableInfo* 
     }
     auto boundExtraInfo = std::make_unique<BoundExtraCreateRelTableGroupInfo>(
         std::move(propertyDefinitions), srcMultiplicity, dstMultiplicity, storageDirection,
-        std::move(nodePairs), std::move(storage), std::move(scanFunction), std::move(scanBindData),
-        std::move(foreignDatabaseName));
+        std::move(nodePairs), std::move(storage), std::move(storageFormat), std::move(scanFunction),
+        std::move(scanBindData), std::move(foreignDatabaseName));
     return BoundCreateTableInfo(CatalogEntryType::REL_GROUP_ENTRY, info->tableName,
         info->onConflict, std::move(boundExtraInfo), clientContext->useInternalCatalogEntry());
 }
@@ -338,6 +390,66 @@ std::unique_ptr<BoundStatement> Binder::bindCreateTable(const Statement& stateme
     auto boundCreateInfo = bindCreateTableInfo(createTable.getInfo());
     return std::make_unique<BoundCreateTable>(std::move(boundCreateInfo),
         BoundStatementResult::createSingleStringColumnResult());
+}
+
+std::unique_ptr<BoundStatement> Binder::bindCreateIndex(const Statement& statement) {
+    auto& createIndex = statement.constCast<CreateIndex>();
+    auto& info = createIndex.getInfo();
+    auto indexType = info.indexType;
+    StringUtils::toUpper(indexType);
+    auto indexTypeOptional = storage::StorageManager::Get(*clientContext)->getIndexType(indexType);
+    if (!indexTypeOptional.has_value()) {
+        throw BinderException(std::format("Index type {} does not exist.", info.indexType));
+    }
+    const auto& registeredIndexType = indexTypeOptional.value().get();
+    if (registeredIndexType.constraintType != storage::IndexConstraintType::PRIMARY) {
+        throw BinderException(
+            std::format("Only primary-key indexes are supported by CREATE INDEX."));
+    }
+    auto catalog = Catalog::Get(*clientContext);
+    auto transaction = transaction::Transaction::Get(*clientContext);
+    validateTableExistence(*clientContext, info.tableName);
+    auto tableEntry = catalog->getTableCatalogEntry(transaction, info.tableName);
+    validateNodeTableType(tableEntry);
+    validateColumnExistence(tableEntry, info.propertyName);
+    auto nodeTableEntry = tableEntry->ptrCast<NodeTableCatalogEntry>();
+    if (!nodeTableEntry->getStorage().empty()) {
+        throw BinderException("CREATE INDEX is only supported on native node tables.");
+    }
+    if (!StringUtils::caseInsensitiveEquals(nodeTableEntry->getPrimaryKeyName(),
+            info.propertyName)) {
+        throw BinderException(std::format(
+            "{} indexes are currently supported only on node primary keys.", indexType));
+    }
+    auto boundOptions = bindParsingOptions(info.options);
+    if (!boundOptions.empty()) {
+        throw BinderException(std::format("CREATE {} INDEX does not support OPTIONS.", indexType));
+    }
+    auto& property = tableEntry->getProperty(info.propertyName);
+    std::vector<PropertyDefinition> propertyDefinitions;
+    propertyDefinitions.push_back(property.copy());
+    validatePrimaryKey(property.getName(), propertyDefinitions);
+    auto indexName = info.indexName.empty() ? std::string(storage::PrimaryKeyIndex::DEFAULT_NAME) :
+                                              info.indexName;
+    if (info.onConflict == ConflictAction::ON_CONFLICT_THROW) {
+        const auto indexNameExists =
+            catalog->containsIndex(transaction, tableEntry->getTableID(), indexName);
+        const auto indexedPropertyExists = catalog->containsIndex(transaction,
+            tableEntry->getTableID(), tableEntry->getPropertyID(property.getName()));
+        if (indexNameExists || indexedPropertyExists) {
+            const auto existingIndexName =
+                indexNameExists ?
+                    indexName :
+                    getExistingIndexName(catalog, transaction, tableEntry->getTableID(),
+                        tableEntry->getPropertyID(property.getName()));
+            throw BinderException(existingIndexName + " already exists in catalog.");
+        }
+    }
+    BoundCreateIndexInfo boundInfo{indexType, std::move(indexName), info.tableName,
+        tableEntry->getTableID(), property.getName(), tableEntry->getPropertyID(property.getName()),
+        tableEntry->getColumnID(property.getName()), property.getType().getPhysicalType(),
+        info.onConflict};
+    return std::make_unique<BoundCreateIndex>(std::move(boundInfo));
 }
 
 std::unique_ptr<BoundStatement> Binder::bindCreateTableAs(const Statement& statement) {
@@ -485,8 +597,36 @@ std::unique_ptr<BoundStatement> Binder::bindDrop(const Statement& statement) {
     return std::make_unique<BoundDrop>(drop.getDropInfo());
 }
 
+static void validateNotIceDiskTable(main::ClientContext* clientContext,
+    const std::string& tableName) {
+    auto catalog = Catalog::Get(*clientContext);
+    auto transaction = transaction::Transaction::Get(*clientContext);
+
+    if (!catalog->containsTable(transaction, tableName)) {
+        return;
+    }
+
+    auto tableEntry = catalog->getTableCatalogEntry(transaction, tableName);
+    StorageFormat storageFormat = StorageFormat::NONE;
+
+    if (tableEntry->getTableType() == common::TableType::NODE) {
+        storageFormat = tableEntry->ptrCast<NodeTableCatalogEntry>()->getStorageFormat();
+    } else if (tableEntry->getTableType() == common::TableType::REL) {
+        storageFormat = tableEntry->ptrCast<RelGroupCatalogEntry>()->getStorageFormat();
+    }
+
+    if (storageFormat == StorageFormat::ICEBUG_DISK) {
+        throw BinderException(
+            std::format("Cannot alter table {}: icebug-disk tables are immutable.", tableName));
+    }
+}
+
 std::unique_ptr<BoundStatement> Binder::bindAlter(const Statement& statement) {
     auto& alter = statement.constCast<Alter>();
+
+    // we don't support alter operations on icebug-disk tables
+    validateNotIceDiskTable(clientContext, alter.getInfo()->tableName);
+
     switch (alter.getInfo()->type) {
     case AlterType::RENAME: {
         return bindRenameTable(statement);

@@ -43,7 +43,6 @@ public:
     virtual bool checkpointInMemory() = 0;
     virtual bool rollbackInMemory() = 0;
     virtual void rollbackCheckpoint() = 0;
-    virtual void bulkReserve(uint64_t numValuesToAppend) = 0;
     virtual void reclaimStorage(PageAllocator& pageAllocator) = 0;
     virtual bool tryLock() = 0;
     virtual std::unique_lock<std::shared_mutex> adoptLock() = 0;
@@ -232,8 +231,6 @@ private:
     void splitSlots(PageAllocator& pageAllocator, const transaction::Transaction* transaction,
         HashIndexHeader& header, slot_id_t numSlotsToSplit);
 
-    // Resizes the local storage to support the given number of new entries
-    void bulkReserve(uint64_t newEntries) override;
     // Resizes the on-disk index to support the given number of new entries
     void reserve(PageAllocator& pageAllocator, const transaction::Transaction* transaction,
         uint64_t newEntries);
@@ -389,6 +386,11 @@ public:
 
     bool lookup(const transaction::Transaction* trx, common::ValueVector* keyVector,
         uint64_t vectorPos, common::offset_t& result, visible_func isVisible);
+    bool lookupPrimaryKey(const transaction::Transaction* transaction,
+        common::ValueVector* keyVector, uint64_t vectorPos, common::offset_t& result,
+        visible_func isVisible) override {
+        return lookup(transaction, keyVector, vectorPos, result, std::move(isVisible));
+    }
 
     std::unique_ptr<Index::InsertState> initInsertState(main::ClientContext*,
         visible_func isVisible) override {
@@ -433,13 +435,6 @@ public:
             bufferOffset, isVisible);
     }
 
-    void bulkReserve(uint64_t numValuesToAppend) {
-        uint32_t eachSize = numValuesToAppend / NUM_HASH_INDEXES + 1;
-        for (auto i = 0u; i < NUM_HASH_INDEXES; i++) {
-            hashIndices[i]->bulkReserve(eachSize);
-        }
-    }
-
     void delete_(common::string_t key) { return delete_(key.getAsStringView()); }
     std::unique_ptr<DeleteState> initDeleteState(const transaction::Transaction* /*transaction*/,
         MemoryManager* /*mm*/, visible_func /*isVisible*/) override {
@@ -463,6 +458,7 @@ public:
     }
 
     void delete_(common::ValueVector* keyVector);
+    void discardPrimaryKey(common::ValueVector* keyVector) override;
 
     void checkpointInMemory() override;
     void checkpoint(main::ClientContext*, storage::PageAllocator& pageAllocator) override;
