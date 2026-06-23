@@ -15,7 +15,7 @@ fn get_target() -> String {
     env::var("PROFILE").unwrap()
 }
 
-fn link_libraries(link_bundled_deps: bool) {
+fn link_libraries(_link_bundled_deps: bool) {
     // This also needs to be set by any crates using it if they want to use extensions
     if !cfg!(windows) && link_mode() == "static" {
         println!("cargo:rustc-link-arg=-rdynamic");
@@ -40,47 +40,22 @@ fn link_libraries(link_bundled_deps: bool) {
             println!("cargo:rustc-link-lib=dylib=stdc++");
         }
 
-        // PATCHED FORK: the from-source 0.17.x build whole-archives both
-        // `liblbug.a` and the bundled third-party archives (antlr4_cypher,
-        // antlr4_runtime, …), but `liblbug.a` already contains those objects, so
-        // each symbol is defined twice at link time. The definitions are
-        // byte-identical (one compile of one source tree), so tell the linker to
-        // keep the first and drop the rest instead of failing with "duplicate
-        // symbol". (The prebuilt path links only the self-contained liblbug.a and
-        // never reaches this branch, so this is scoped to the from-source case.)
-        if link_bundled_deps && !cfg!(windows) {
-            println!("cargo:rustc-link-arg=-Wl,--allow-multiple-definition");
-        }
-
-        if !link_bundled_deps {
-            return;
-        }
-
-        for lib in [
-            "utf8proc",
-            "antlr4_cypher",
-            "antlr4_runtime",
-            "re2",
-            "fastpfor",
-            "parquet",
-            "thrift",
-            "snappy",
-            "zstd",
-            "miniz",
-            "mbedtls",
-            "brotlidec",
-            "brotlicommon",
-            "lz4",
-            "roaring_bitmap",
-            "simsimd",
-            "yyjson",
-        ] {
-            if rustversion::cfg!(since(1.82)) {
-                println!("cargo:rustc-link-lib=static:+whole-archive={lib}");
-            } else {
-                println!("cargo:rustc-link-lib=static={lib}");
-            }
-        }
+        // PATCHED FORK: this 0.17.x cmake build produces a SELF-CONTAINED
+        // `liblbug.a` — it already includes every bundled third-party object
+        // (antlr4_cypher, antlr4_runtime, utf8proc, zstd, parquet, …). Upstream's
+        // build.rs nonetheless *also* whole-archives the separate third-party
+        // archives, which makes every such symbol defined twice and breaks the
+        // final link of any downstream binary ("duplicate symbol: CypherLexer…").
+        // The prebuilt path links only liblbug.a and is fine; mirror that here by
+        // linking just the self-contained liblbug.a (already whole-archived above)
+        // and skipping the redundant per-dep archives. (A build-script
+        // `rustc-link-arg` does not propagate to a dependent crate's link, so
+        // `--allow-multiple-definition` cannot be applied from here — removing the
+        // duplication at the source is the correct fix.)
+        // Nothing further to link: liblbug.a (whole-archived above) is
+        // self-contained, so the per-dep third-party archives are intentionally
+        // not linked — linking them would duplicate the symbols already inside
+        // liblbug.a and break the downstream binary link.
     }
 }
 
