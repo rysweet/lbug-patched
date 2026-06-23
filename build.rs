@@ -76,6 +76,7 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
 }
 
+#[allow(dead_code)] // retained for reference; this patched fork never links a prebuilt archive
 fn static_lbug_file_name() -> &'static str {
     if cfg!(windows) {
         "lbug.lib"
@@ -133,7 +134,7 @@ fn emit_lbug_metadata(source: &str, lib_dir: &Path) {
     );
 }
 
-fn try_download_prebuilt_lbug(manifest_dir: &Path) -> bool {
+fn try_download_prebuilt_lbug(_manifest_dir: &Path) -> bool {
     for var in [
         "LBUG_PRECOMPILED_RUN_ID",
         "LBUG_VERSION",
@@ -146,47 +147,17 @@ fn try_download_prebuilt_lbug(manifest_dir: &Path) -> bool {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
-    if link_mode() != "static" {
-        return false;
-    }
-    if env::var("LBUG_BUILD_FROM_SOURCE").is_ok() || env::var("LBUG_RUST_BUILD_FROM_SOURCE").is_ok()
-    {
-        println!("cargo:warning=Skipping prebuilt liblbug because source build was requested");
-        return false;
-    }
-
-    let lib_dir = prebuilt_lib_dir(manifest_dir);
-    let lib_path = lib_dir.join(static_lbug_file_name());
-    if lib_path.exists() {
-        return true;
-    }
-
-    let script = manifest_dir.join("scripts").join("download_lbug.sh");
-    if !script.exists() {
-        return false;
-    }
-
-    let status = std::process::Command::new("sh")
-        .arg(&script)
-        .env("LBUG_TARGET_DIR", &lib_dir)
-        .current_dir(manifest_dir)
-        .status();
-
-    match status {
-        Ok(status) if status.success() && lib_path.exists() => true,
-        Ok(status) => {
-            println!(
-                "cargo:warning=Prebuilt liblbug download failed with status {status}; building from source"
-            );
-            false
-        }
-        Err(error) => {
-            println!(
-                "cargo:warning=Could not run prebuilt liblbug downloader ({error}); building from source"
-            );
-            false
-        }
-    }
+    // PATCHED FORK (LadybugDB #611 / amplihack-memory #100): never link a
+    // downloaded/cached prebuilt `liblbug` archive — that would be the UNPATCHED
+    // upstream engine. This fork exists to link the CSR getGroup bounds-check,
+    // which lives only in the bundled `lbug-src`, so always compile from source.
+    // (Upstream 0.17.x defaults to the prebuilt; we override that here so any
+    // consumer that opts into this `[patch.crates-io]` crate gets the fix without
+    // needing LBUG_BUILD_FROM_SOURCE.)
+    println!(
+        "cargo:warning=lbug-patched: building bundled lbug-src from source so the CSR getGroup fix (LadybugDB #611) is linked, not a prebuilt archive"
+    );
+    false
 }
 
 fn use_prebuilt_lbug(manifest_dir: &Path) -> Option<Vec<PathBuf>> {
